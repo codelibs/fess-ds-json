@@ -54,7 +54,7 @@ public class JsonDataStore extends AbstractDataStore {
     private String[] fileSuffixes = new String[] { ".json", ".jsonl" };
 
     protected String getName() {
-        return "JSON";
+        return this.getClass().getSimpleName();
     }
 
     @Override
