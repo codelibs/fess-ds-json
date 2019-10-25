@@ -105,7 +105,7 @@ public class JsonDataStore extends AbstractDataStore {
             }
         }
         if (fileList.isEmpty() && logger.isDebugEnabled()) {
-            logger.debug("No files in " + value);
+            logger.debug("No files in {}", value);
         }
         return fileList;
     }
