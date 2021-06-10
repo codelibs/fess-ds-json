@@ -132,6 +132,7 @@ public class JsonDataStore extends AbstractDataStore {
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap, final File file, final String fileEncoding) {
         final ObjectMapper objectMapper = new ObjectMapper();
 
+        final String scriptType = getScriptType(paramMap);
         logger.info("Loading " + file.getAbsolutePath());
         try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(file), fileEncoding))) {
             for (String line; (line = br.readLine()) != null;) {
@@ -144,7 +145,7 @@ public class JsonDataStore extends AbstractDataStore {
                 resultMap.putAll(source);
 
                 for (final Map.Entry<String, String> entry : scriptMap.entrySet()) {
-                    final Object convertValue = convertValue(entry.getValue(), resultMap);
+                    final Object convertValue = convertValue(scriptType, entry.getValue(), resultMap);
                     if (convertValue != null) {
                         dataMap.put(entry.getKey(), convertValue);
                     }
