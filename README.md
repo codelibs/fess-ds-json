@@ -1,4 +1,5 @@
-JSON Data Store for Fess [![Build Status](https://travis-ci.org/codelibs/fess-ds-json.svg?branch=master)](https://travis-ci.org/codelibs/fess-ds-json)
+JSON Data Store for Fess
+[![Java CI with Maven](https://github.com/codelibs/fess-ds-json/actions/workflows/maven.yml/badge.svg)](https://github.com/codelibs/fess-ds-json/actions/workflows/maven.yml)
 ==========================
 
 ## Overview
