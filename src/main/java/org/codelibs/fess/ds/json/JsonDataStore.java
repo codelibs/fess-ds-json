@@ -51,8 +51,9 @@ public class JsonDataStore extends AbstractDataStore {
 
     private static final String DIRS_PARAM = "directories";
 
-    private String[] fileSuffixes = new String[] { ".json", ".jsonl" };
+    private String[] fileSuffixes = { ".json", ".jsonl" };
 
+    @Override
     protected String getName() {
         return this.getClass().getSimpleName();
     }
