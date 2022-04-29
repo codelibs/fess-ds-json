@@ -32,11 +32,16 @@ import java.util.Map;
 
 import org.codelibs.core.lang.StringUtil;
 import org.codelibs.fess.Constants;
+import org.codelibs.fess.app.service.FailureUrlService;
 import org.codelibs.fess.ds.AbstractDataStore;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.es.config.exentity.DataConfig;
 import org.codelibs.fess.exception.DataStoreException;
+import org.codelibs.fess.helper.CrawlerStatsHelper;
+import org.codelibs.fess.helper.CrawlerStatsHelper.StatsAction;
+import org.codelibs.fess.helper.CrawlerStatsHelper.StatsKeyObject;
+import org.codelibs.fess.util.ComponentUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -128,28 +133,50 @@ public class JsonDataStore extends AbstractDataStore {
 
     private void processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap, final File file, final String fileEncoding) {
+        final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
         final ObjectMapper objectMapper = new ObjectMapper();
 
         final String scriptType = getScriptType(paramMap);
         logger.info("Loading {}", file.getAbsolutePath());
         try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(file), fileEncoding))) {
+            int count = 0;
             for (String line; (line = br.readLine()) != null;) {
-                final Map<String, Object> source = objectMapper.readValue(line, new TypeReference<Map<String, Object>>() {
-                });
-                final Map<String, Object> resultMap = new LinkedHashMap<>();
+                count++;
+                final StatsKeyObject statsKey = new StatsKeyObject(file.getAbsolutePath() + "@" + count);
                 final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
+                try {
+                    crawlerStatsHelper.begin(statsKey);
+                    final Map<String, Object> source = objectMapper.readValue(line, new TypeReference<Map<String, Object>>() {
+                    });
+                    final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap.asMap());
 
-                resultMap.putAll(paramMap.asMap());
-                resultMap.putAll(source);
+                    resultMap.putAll(source);
 
-                for (final Map.Entry<String, String> entry : scriptMap.entrySet()) {
-                    final Object convertValue = convertValue(scriptType, entry.getValue(), resultMap);
-                    if (convertValue != null) {
-                        dataMap.put(entry.getKey(), convertValue);
+                    crawlerStatsHelper.record(statsKey, StatsAction.PREPARED);
+
+                    for (final Map.Entry<String, String> entry : scriptMap.entrySet()) {
+                        final Object convertValue = convertValue(scriptType, entry.getValue(), resultMap);
+                        if (convertValue != null) {
+                            dataMap.put(entry.getKey(), convertValue);
+                        }
                     }
-                }
 
-                callback.store(paramMap, dataMap);
+                    crawlerStatsHelper.record(statsKey, StatsAction.EVALUATED);
+
+                    if (dataMap.get("url") instanceof final String statsUrl) {
+                        statsKey.setUrl(statsUrl);
+                    }
+
+                    callback.store(paramMap, dataMap);
+                    crawlerStatsHelper.record(statsKey, StatsAction.FINISHED);
+                } catch (final Throwable t) {
+                    logger.warn("Crawling Access Exception at : {}", dataMap, t);
+                    final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
+                    failureUrlService.store(dataConfig, t.getClass().getCanonicalName(), statsKey.getId(), t);
+                    crawlerStatsHelper.record(statsKey, StatsAction.EXCEPTION);
+                } finally {
+                    crawlerStatsHelper.done(statsKey);
+                }
             }
         } catch (final FileNotFoundException e) {
             logger.warn("Source file " + file + " does not exist.", e);
