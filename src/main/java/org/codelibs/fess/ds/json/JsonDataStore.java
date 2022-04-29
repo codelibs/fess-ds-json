@@ -34,6 +34,7 @@ import org.codelibs.core.lang.StringUtil;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.ds.AbstractDataStore;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
+import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.es.config.exentity.DataConfig;
 import org.codelibs.fess.exception.DataStoreException;
 import org.slf4j.Logger;
@@ -59,7 +60,7 @@ public class JsonDataStore extends AbstractDataStore {
     }
 
     @Override
-    protected void storeData(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, String> paramMap,
+    protected void storeData(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap) {
         final String fileEncoding = getFileEncoding(paramMap);
         final List<File> fileList = getFileList(paramMap);
@@ -74,15 +75,15 @@ public class JsonDataStore extends AbstractDataStore {
         }
     }
 
-    private List<File> getFileList(final Map<String, String> paramMap) {
-        String value = paramMap.get(FILES_PARAM);
+    private List<File> getFileList(final DataStoreParams paramMap) {
+        String value = paramMap.getAsString(FILES_PARAM);
         final List<File> fileList = new ArrayList<>();
         if (StringUtil.isBlank(value)) {
-            value = paramMap.get(DIRS_PARAM);
+            value = paramMap.getAsString(DIRS_PARAM);
             if (StringUtil.isBlank(value)) {
                 throw new DataStoreException(FILES_PARAM + " and " + DIRS_PARAM + " are blank.");
             }
-            logger.info(DIRS_PARAM + "=" + value);
+            logger.info("{}={}", DIRS_PARAM, value);
             final String[] values = value.split(",");
             for (final String path : values) {
                 final File dir = new File(path);
@@ -90,18 +91,18 @@ public class JsonDataStore extends AbstractDataStore {
                     stream(dir.listFiles()).of(stream -> stream.filter(f -> isDesiredFile(f.getParentFile(), f.getName()))
                             .sorted((f1, f2) -> (int) (f1.lastModified() - f2.lastModified())).forEach(fileList::add));
                 } else {
-                    logger.warn(path + " is not a directory.");
+                    logger.warn("{} is not a directory.", path);
                 }
             }
         } else {
-            logger.info(FILES_PARAM + "=" + value);
+            logger.info("{}={}", FILES_PARAM, value);
             final String[] values = value.split(",");
             for (final String path : values) {
                 final File file = new File(path);
                 if (file.isFile() && isDesiredFile(file.getParentFile(), file.getName())) {
                     fileList.add(file);
                 } else {
-                    logger.warn(path + " is not found.");
+                    logger.warn("{} is not found.", path);
                 }
             }
         }
@@ -121,20 +122,16 @@ public class JsonDataStore extends AbstractDataStore {
         return false;
     }
 
-    private String getFileEncoding(final Map<String, String> paramMap) {
-        final String value = paramMap.get(FILE_ENCODING_PARAM);
-        if (StringUtil.isBlank(value)) {
-            return Constants.UTF_8;
-        }
-        return value;
+    private String getFileEncoding(final DataStoreParams paramMap) {
+        return paramMap.getAsString(FILE_ENCODING_PARAM, Constants.UTF_8);
     }
 
-    private void processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, String> paramMap,
+    private void processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap, final File file, final String fileEncoding) {
         final ObjectMapper objectMapper = new ObjectMapper();
 
         final String scriptType = getScriptType(paramMap);
-        logger.info("Loading " + file.getAbsolutePath());
+        logger.info("Loading {}", file.getAbsolutePath());
         try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(file), fileEncoding))) {
             for (String line; (line = br.readLine()) != null;) {
                 final Map<String, Object> source = objectMapper.readValue(line, new TypeReference<Map<String, Object>>() {
@@ -142,7 +139,7 @@ public class JsonDataStore extends AbstractDataStore {
                 final Map<String, Object> resultMap = new LinkedHashMap<>();
                 final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
 
-                resultMap.putAll(paramMap);
+                resultMap.putAll(paramMap.asMap());
                 resultMap.putAll(source);
 
                 for (final Map.Entry<String, String> entry : scriptMap.entrySet()) {
