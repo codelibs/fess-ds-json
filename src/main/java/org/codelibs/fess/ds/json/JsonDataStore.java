@@ -143,6 +143,7 @@ public class JsonDataStore extends AbstractDataStore {
             for (String line; (line = br.readLine()) != null;) {
                 count++;
                 final StatsKeyObject statsKey = new StatsKeyObject(file.getAbsolutePath() + "@" + count);
+                paramMap.put(Constants.CRAWLER_STATS_KEY, statsKey);
                 final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
                 try {
                     crawlerStatsHelper.begin(statsKey);
@@ -179,7 +180,7 @@ public class JsonDataStore extends AbstractDataStore {
                 }
             }
         } catch (final FileNotFoundException e) {
-            logger.warn("Source file " + file + " does not exist.", e);
+            logger.warn("Source file {} does not exist.", file, e);
         } catch (final IOException e) {
             logger.warn("IO Error occurred while reading source file.", e);
         }
