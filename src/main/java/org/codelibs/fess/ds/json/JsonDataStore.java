@@ -48,6 +48,24 @@ import org.codelibs.fess.util.ComponentUtil;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+/**
+ * JSON Data Store implementation for Fess that processes JSON and JSONL files.
+ * This data store extends AbstractDataStore to provide functionality for crawling
+ * and indexing JSON and JSONL files from the filesystem.
+ *
+ * <p>Supported file formats:</p>
+ * <ul>
+ * <li>.json - Standard JSON files</li>
+ * <li>.jsonl - JSON Lines format (one JSON object per line)</li>
+ * </ul>
+ *
+ * <p>Configuration parameters:</p>
+ * <ul>
+ * <li>files - Comma-separated list of file paths to process</li>
+ * <li>directories - Comma-separated list of directory paths to scan</li>
+ * <li>fileEncoding - Character encoding for files (default: UTF-8)</li>
+ * </ul>
+ */
 public class JsonDataStore extends AbstractDataStore {
     private static final Logger logger = LogManager.getLogger(JsonDataStore.class);
 
@@ -58,6 +76,14 @@ public class JsonDataStore extends AbstractDataStore {
     private static final String DIRS_PARAM = "directories";
 
     private String[] fileSuffixes = { ".json", ".jsonl" };
+
+    /**
+     * Default constructor for JsonDataStore.
+     * Initializes the data store with default file suffixes for JSON and JSONL files.
+     */
+    public JsonDataStore() {
+        super();
+    }
 
     @Override
     protected String getName() {
@@ -186,6 +212,11 @@ public class JsonDataStore extends AbstractDataStore {
         }
     }
 
+    /**
+     * Sets the file suffixes that this data store will process.
+     *
+     * @param fileSuffixes Array of file suffixes (e.g., ".json", ".jsonl")
+     */
     public void setFileSuffixes(final String[] fileSuffixes) {
         this.fileSuffixes = fileSuffixes;
     }
