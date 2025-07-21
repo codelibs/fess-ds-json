@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-2023 CodeLibs Project and the Others.
+ * Copyright 2012-2025 CodeLibs Project and the Others.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,26 +30,44 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codelibs.core.lang.StringUtil;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.app.service.FailureUrlService;
 import org.codelibs.fess.ds.AbstractDataStore;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.entity.DataStoreParams;
-import org.codelibs.fess.es.config.exentity.DataConfig;
 import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.helper.CrawlerStatsHelper;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsAction;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsKeyObject;
+import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.util.ComponentUtil;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+/**
+ * JSON Data Store implementation for Fess that processes JSON and JSONL files.
+ * This data store extends AbstractDataStore to provide functionality for crawling
+ * and indexing JSON and JSONL files from the filesystem.
+ *
+ * <p>Supported file formats:</p>
+ * <ul>
+ * <li>.json - Standard JSON files</li>
+ * <li>.jsonl - JSON Lines format (one JSON object per line)</li>
+ * </ul>
+ *
+ * <p>Configuration parameters:</p>
+ * <ul>
+ * <li>files - Comma-separated list of file paths to process</li>
+ * <li>directories - Comma-separated list of directory paths to scan</li>
+ * <li>fileEncoding - Character encoding for files (default: UTF-8)</li>
+ * </ul>
+ */
 public class JsonDataStore extends AbstractDataStore {
-    private static final Logger logger = LoggerFactory.getLogger(JsonDataStore.class);
+    private static final Logger logger = LogManager.getLogger(JsonDataStore.class);
 
     private static final String FILE_ENCODING_PARAM = "fileEncoding";
 
@@ -58,6 +76,14 @@ public class JsonDataStore extends AbstractDataStore {
     private static final String DIRS_PARAM = "directories";
 
     private String[] fileSuffixes = { ".json", ".jsonl" };
+
+    /**
+     * Default constructor for JsonDataStore.
+     * Initializes the data store with default file suffixes for JSON and JSONL files.
+     */
+    public JsonDataStore() {
+        super();
+    }
 
     @Override
     protected String getName() {
@@ -186,6 +212,11 @@ public class JsonDataStore extends AbstractDataStore {
         }
     }
 
+    /**
+     * Sets the file suffixes that this data store will process.
+     *
+     * @param fileSuffixes Array of file suffixes (e.g., ".json", ".jsonl")
+     */
     public void setFileSuffixes(final String[] fileSuffixes) {
         this.fileSuffixes = fileSuffixes;
     }
