@@ -120,7 +120,8 @@ public class JsonDataStore extends AbstractDataStore {
                 final File dir = new File(path);
                 if (dir.isDirectory()) {
                     stream(dir.listFiles()).of(stream -> stream.filter(f -> isDesiredFile(f.getParentFile(), f.getName()))
-                            .sorted((f1, f2) -> (int) (f1.lastModified() - f2.lastModified())).forEach(fileList::add));
+                            .sorted((f1, f2) -> (int) (f1.lastModified() - f2.lastModified()))
+                            .forEach(fileList::add));
                 } else {
                     logger.warn("{} is not a directory.", path);
                 }
