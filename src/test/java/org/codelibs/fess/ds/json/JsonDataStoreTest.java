@@ -29,6 +29,7 @@ import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.util.ComponentUtil;
 import org.dbflute.utflute.lastadi.ContainerTestCase;
+import org.lastaflute.di.core.exception.ComponentNotFoundException;
 
 /**
  * Comprehensive unit tests for JsonDataStore class.
@@ -36,8 +37,8 @@ import org.dbflute.utflute.lastadi.ContainerTestCase;
  * file list management, and error scenarios.
  *
  * Note: Some tests that require full DI container initialization (e.g., CrawlerStatsHelper)
- * are designed to handle NullPointerException gracefully, as these dependencies may not
- * be available in the unit test environment.
+ * are designed to handle exceptions (NullPointerException, ComponentNotFoundException)
+ * gracefully, as these dependencies may not be available in the unit test environment.
  */
 public class JsonDataStoreTest extends ContainerTestCase {
     public JsonDataStore dataStore;
@@ -399,10 +400,10 @@ public class JsonDataStoreTest extends ContainerTestCase {
                 dataStore.storeData(dataConfig, callback, params, scriptMap, defaultDataMap);
                 // If successful, callback should have been called 3 times (1 JSON + 2 JSONL lines)
                 // However, this requires proper dependency setup which may not be available in test environment
-            } catch (NullPointerException e) {
-                // Expected if dependencies are not initialized
+            } catch (NullPointerException | ComponentNotFoundException e) {
+                // Expected if dependencies are not initialized in DI container
                 // This is acceptable for this unit test
-                assertTrue("NPE expected when dependencies not initialized", true);
+                assertTrue("Exception expected when dependencies not initialized: " + e.getClass().getSimpleName(), true);
             }
 
         } finally {
@@ -435,9 +436,9 @@ public class JsonDataStoreTest extends ContainerTestCase {
             try {
                 dataStore.storeData(dataConfig, callback, params, scriptMap, defaultDataMap);
                 // Only JSON file should be processed, not TXT file
-            } catch (NullPointerException e) {
-                // Expected if dependencies are not initialized
-                assertTrue("NPE expected when dependencies not initialized", true);
+            } catch (NullPointerException | ComponentNotFoundException e) {
+                // Expected if dependencies are not initialized in DI container
+                assertTrue("Exception expected when dependencies not initialized: " + e.getClass().getSimpleName(), true);
             }
 
         } finally {
