@@ -139,8 +139,7 @@ public class JsonDataStoreTest extends ContainerTestCase {
         } catch (java.lang.reflect.InvocationTargetException e) {
             // InvocationTargetException wraps the actual exception
             Throwable cause = e.getCause();
-            assertTrue("Expected DataStoreException but got: " + cause.getClass().getName(),
-                    cause instanceof DataStoreException);
+            assertTrue("Expected DataStoreException but got: " + cause.getClass().getName(), cause instanceof DataStoreException);
             assertTrue(cause.getMessage().contains("files") && cause.getMessage().contains("directories"));
         } catch (Exception e) {
             fail("Expected InvocationTargetException with DataStoreException but got: " + e.getClass().getName());
