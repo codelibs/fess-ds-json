@@ -15,6 +15,8 @@
  */
 package org.codelibs.fess.ds.json;
 
+import org.junit.jupiter.api.TestInfo;
+
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -28,7 +30,7 @@ import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.util.ComponentUtil;
-import org.dbflute.utflute.lastadi.ContainerTestCase;
+import org.codelibs.fess.ds.json.UnitDsTestCase;
 import org.lastaflute.di.core.exception.ComponentNotFoundException;
 
 /**
@@ -40,7 +42,7 @@ import org.lastaflute.di.core.exception.ComponentNotFoundException;
  * are designed to handle exceptions (NullPointerException, ComponentNotFoundException)
  * gracefully, as these dependencies may not be available in the unit test environment.
  */
-public class JsonDataStoreTest extends ContainerTestCase {
+public class JsonDataStoreTest extends UnitDsTestCase {
     public JsonDataStore dataStore;
 
     @Override
@@ -54,15 +56,15 @@ public class JsonDataStoreTest extends ContainerTestCase {
     }
 
     @Override
-    public void setUp() throws Exception {
-        super.setUp();
+    public void setUp(TestInfo testInfo) throws Exception {
+        super.setUp(testInfo);
         dataStore = new JsonDataStore();
     }
 
     @Override
-    public void tearDown() throws Exception {
+    public void tearDown(TestInfo testInfo) throws Exception {
         ComponentUtil.setFessConfig(null);
-        super.tearDown();
+        super.tearDown(testInfo);
     }
 
     /**
