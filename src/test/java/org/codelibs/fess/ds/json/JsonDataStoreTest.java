@@ -22,17 +22,23 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.codelibs.fess.Constants;
+import org.codelibs.fess.app.service.FailureUrlService;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreException;
+import org.codelibs.fess.helper.CrawlerStatsHelper;
+import org.codelibs.fess.helper.SystemHelper;
+import org.codelibs.fess.opensearch.config.exentity.CrawlingConfig;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
+import org.codelibs.fess.opensearch.config.exentity.FailureUrl;
 import org.codelibs.fess.util.ComponentUtil;
 import org.codelibs.fess.ds.json.UnitDsTestCase;
-import org.lastaflute.di.core.exception.ComponentNotFoundException;
 
 /**
  * Comprehensive unit tests for JsonDataStore class.
@@ -45,6 +51,9 @@ import org.lastaflute.di.core.exception.ComponentNotFoundException;
  */
 public class JsonDataStoreTest extends UnitDsTestCase {
     public JsonDataStore dataStore;
+
+    /** FailureUrlService に記録された失敗を "<errorName> @ <url>" 形式で保持する。 */
+    public final List<String> failureUrls = new ArrayList<>();
 
     @Override
     protected String prepareConfigFile() {
@@ -60,6 +69,24 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     public void setUp(TestInfo testInfo) throws Exception {
         super.setUp(testInfo);
         dataStore = new JsonDataStore();
+        failureUrls.clear();
+
+        // storeData は CrawlerStatsHelper を使い、CrawlerStatsHelper は SystemHelper を使う。
+        // 初期化済みインスタンスを登録してパイプライン全体をテスト内で通せるようにする。
+        ComponentUtil.register(new SystemHelper(), "systemHelper");
+        final CrawlerStatsHelper crawlerStatsHelper = new CrawlerStatsHelper();
+        crawlerStatsHelper.init();
+        ComponentUtil.register(crawlerStatsHelper, "crawlerStatsHelper");
+
+        // 失敗記録の本物は OpenSearch を要求するため、記録内容だけを控える no-op に差し替える。
+        // ComponentUtil.getComponent(Class) が解決できるよう正準名で登録する。
+        ComponentUtil.register(new FailureUrlService() {
+            @Override
+            public FailureUrl store(final CrawlingConfig crawlingConfig, final String errorName, final String url, final Throwable e) {
+                failureUrls.add(errorName + " @ " + url);
+                return null;
+            }
+        }, FailureUrlService.class.getCanonicalName());
     }
 
     @Override
@@ -383,86 +410,50 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * Test storeData with valid JSON files.
-     * This is an integration test that verifies the complete flow including processFile.
+     * storeData が JSON/JSONL の全レコードを callback に渡すことを検証する。
      */
     @Test
     public void test_storeData_withValidFiles() throws Exception {
-        Path tempDir = Files.createTempDirectory("jsontest");
-        Path jsonFile = Files.createTempFile(tempDir, "test", ".json");
-        Path jsonlFile = Files.createTempFile(tempDir, "test", ".jsonl");
+        final Path tempDir = Files.createTempDirectory("jsontest");
+        final Path jsonFile = tempDir.resolve("a.json");
+        final Path jsonlFile = tempDir.resolve("b.jsonl");
+        Files.writeString(jsonFile, "{\"id\":\"123\",\"title\":\"Test\",\"url\":\"http://example.com/1\"}\n");
+        Files.writeString(jsonlFile, "{\"id\":\"1\",\"title\":\"First\",\"url\":\"http://example.com/2\"}\n"
+                + "{\"id\":\"2\",\"title\":\"Second\",\"url\":\"http://example.com/3\"}\n");
 
-        try {
-            // Write valid JSON
-            String json = "{\"id\": \"123\", \"title\": \"Test\"}";
-            Files.write(jsonFile, json.getBytes());
+        final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+        final DataStoreParams params = new DataStoreParams();
+        params.put("directories", tempDir.toString());
+        final Map<String, String> scriptMap = new HashMap<>();
+        scriptMap.put("url", "url");
+        scriptMap.put("title", "title");
 
-            // Write valid JSONL (2 lines)
-            String jsonl = "{\"id\": \"1\", \"title\": \"First\"}\n{\"id\": \"2\", \"title\": \"Second\"}";
-            Files.write(jsonlFile, jsonl.getBytes());
+        dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
 
-            DataConfig dataConfig = new DataConfig();
-            TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
-            DataStoreParams params = new DataStoreParams();
-            Map<String, String> scriptMap = new HashMap<>();
-            Map<String, Object> defaultDataMap = new HashMap<>();
-
-            // Set directory parameter
-            params.put("directories", tempDir.toString());
-
-            // Note: This test may fail if dependencies (CrawlerStatsHelper, etc.) are not properly initialized
-            // In a real environment, these would be set up through the DI container
-            try {
-                dataStore.storeData(dataConfig, callback, params, scriptMap, defaultDataMap);
-                // If successful, callback should have been called 3 times (1 JSON + 2 JSONL lines)
-                // However, this requires proper dependency setup which may not be available in test environment
-            } catch (NullPointerException | ComponentNotFoundException e) {
-                // Expected if dependencies are not initialized in DI container
-                // This is acceptable for this unit test
-                assertTrue("Exception expected when dependencies not initialized: " + e.getClass().getSimpleName(), true);
-            }
-
-        } finally {
-            Files.deleteIfExists(jsonFile);
-            Files.deleteIfExists(jsonlFile);
-            Files.deleteIfExists(tempDir);
-        }
+        assertEquals("1 record from .json + 2 records from .jsonl", 3, callback.getDataMapList().size());
+        assertEquals("no failures should be recorded", 0, failureUrls.size());
+        assertEquals("Test", callback.getDataMapList().get(0).get("title"));
     }
 
     /**
-     * Test that file filtering works correctly - non-JSON files should be ignored.
+     * 拡張子が対象外のファイルが処理されないことを検証する。
      */
     @Test
     public void test_storeData_fileFiltering() throws Exception {
-        Path tempDir = Files.createTempDirectory("jsontest");
-        Path jsonFile = Files.createTempFile(tempDir, "test", ".json");
-        Path txtFile = Files.createTempFile(tempDir, "test", ".txt");
+        final Path tempDir = Files.createTempDirectory("jsontest");
+        Files.writeString(tempDir.resolve("a.json"), "{\"url\":\"http://example.com/1\"}\n");
+        Files.writeString(tempDir.resolve("b.txt"), "{\"url\":\"http://example.com/2\"}\n");
 
-        try {
-            Files.write(jsonFile, "{\"id\": \"1\"}".getBytes());
-            Files.write(txtFile, "not json".getBytes());
+        final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+        final DataStoreParams params = new DataStoreParams();
+        params.put("directories", tempDir.toString());
+        final Map<String, String> scriptMap = new HashMap<>();
+        scriptMap.put("url", "url");
 
-            DataConfig dataConfig = new DataConfig();
-            TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
-            DataStoreParams params = new DataStoreParams();
-            Map<String, String> scriptMap = new HashMap<>();
-            Map<String, Object> defaultDataMap = new HashMap<>();
+        dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
 
-            params.put("directories", tempDir.toString());
-
-            try {
-                dataStore.storeData(dataConfig, callback, params, scriptMap, defaultDataMap);
-                // Only JSON file should be processed, not TXT file
-            } catch (NullPointerException | ComponentNotFoundException e) {
-                // Expected if dependencies are not initialized in DI container
-                assertTrue("Exception expected when dependencies not initialized: " + e.getClass().getSimpleName(), true);
-            }
-
-        } finally {
-            Files.deleteIfExists(jsonFile);
-            Files.deleteIfExists(txtFile);
-            Files.deleteIfExists(tempDir);
-        }
+        assertEquals("only the .json file is processed", 1, callback.getDataMapList().size());
+        assertEquals("http://example.com/1", callback.getDataMapList().get(0).get("url"));
     }
 
     /**
@@ -550,12 +541,17 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     /**
      * Test implementation of IndexUpdateCallback for testing purposes.
      */
-    private static class TestIndexUpdateCallback implements IndexUpdateCallback {
-        private int callCount = 0;
+    static class TestIndexUpdateCallback implements IndexUpdateCallback {
+        private final List<Map<String, Object>> dataMapList = new ArrayList<>();
 
         @Override
-        public void store(DataStoreParams paramMap, Map<String, Object> dataMap) {
-            callCount++;
+        public void store(final DataStoreParams paramMap, final Map<String, Object> dataMap) {
+            dataMapList.add(new HashMap<>(dataMap));
+        }
+
+        @Override
+        public long getDocumentSize() {
+            return dataMapList.size();
         }
 
         @Override
@@ -564,16 +560,12 @@ public class JsonDataStoreTest extends UnitDsTestCase {
         }
 
         @Override
-        public long getDocumentSize() {
-            return 0;
-        }
-
-        @Override
         public void commit() {
+            // nothing to do
         }
 
-        public int getCallCount() {
-            return callCount;
+        List<Map<String, Object>> getDataMapList() {
+            return dataMapList;
         }
     }
 }
