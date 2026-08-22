@@ -24,6 +24,7 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -120,7 +121,7 @@ public class JsonDataStore extends AbstractDataStore {
                 final File dir = new File(path);
                 if (dir.isDirectory()) {
                     stream(dir.listFiles()).of(stream -> stream.filter(f -> isDesiredFile(f.getParentFile(), f.getName()))
-                            .sorted((f1, f2) -> (int) (f1.lastModified() - f2.lastModified()))
+                            .sorted(Comparator.comparingLong(File::lastModified))
                             .forEach(fileList::add));
                 } else {
                     logger.warn("{} is not a directory.", path);

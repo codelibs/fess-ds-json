@@ -15,6 +15,7 @@
  */
 package org.codelibs.fess.ds.json;
 
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 
 import java.io.File;
@@ -70,6 +71,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     /**
      * Test that getName returns the correct class simple name.
      */
+    @Test
     public void test_getName() {
         assertEquals("JsonDataStore", dataStore.getName());
     }
@@ -77,6 +79,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     /**
      * Test that default file suffixes include .json and .jsonl.
      */
+    @Test
     public void test_isDesiredFile_defaultSuffixes() throws Exception {
         File parentDir = new File("/tmp");
 
@@ -100,6 +103,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     /**
      * Test setting custom file suffixes.
      */
+    @Test
     public void test_setFileSuffixes_customSuffixes() throws Exception {
         dataStore.setFileSuffixes(new String[] { ".data", ".txt" });
         File parentDir = new File("/tmp");
@@ -113,6 +117,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     /**
      * Test getFileEncoding with default UTF-8 encoding.
      */
+    @Test
     public void test_getFileEncoding_default() throws Exception {
         DataStoreParams params = new DataStoreParams();
         String encoding = invokeMethod(dataStore, "getFileEncoding", params);
@@ -122,6 +127,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     /**
      * Test getFileEncoding with custom encoding specified.
      */
+    @Test
     public void test_getFileEncoding_custom() throws Exception {
         DataStoreParams params = new DataStoreParams();
         params.put("fileEncoding", "ISO-8859-1");
@@ -132,6 +138,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     /**
      * Test getFileList throws exception when both files and directories are blank.
      */
+    @Test
     public void test_getFileList_blankParameters() {
         DataStoreParams params = new DataStoreParams();
 
@@ -151,6 +158,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     /**
      * Test getFileList with files parameter.
      */
+    @Test
     public void test_getFileList_withFilesParameter() throws Exception {
         // Create temporary test files
         Path tempDir = Files.createTempDirectory("jsontest");
@@ -191,6 +199,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     /**
      * Test getFileList with directories parameter.
      */
+    @Test
     public void test_getFileList_withDirectoriesParameter() throws Exception {
         // Create temporary directory with test files
         Path tempDir = Files.createTempDirectory("jsontest");
@@ -231,6 +240,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     /**
      * Test getFileList with multiple directories.
      */
+    @Test
     public void test_getFileList_withMultipleDirectories() throws Exception {
         Path tempDir1 = Files.createTempDirectory("jsontest1");
         Path tempDir2 = Files.createTempDirectory("jsontest2");
@@ -265,6 +275,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     /**
      * Test getFileList with non-existent file path.
      */
+    @Test
     public void test_getFileList_withNonExistentFile() throws Exception {
         DataStoreParams params = new DataStoreParams();
         params.put("files", "/nonexistent/path/test.json");
@@ -282,6 +293,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     /**
      * Test getFileList with non-directory path.
      */
+    @Test
     public void test_getFileList_withNonDirectoryPath() throws Exception {
         Path tempFile = Files.createTempFile("notadir", ".json");
 
@@ -308,6 +320,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     /**
      * Test file sorting by last modified time.
      */
+    @Test
     public void test_getFileList_sortedByModifiedTime() throws Exception {
         Path tempDir = Files.createTempDirectory("jsontest");
         Path jsonFile1 = Files.createTempFile(tempDir, "test1", ".json");
@@ -351,6 +364,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     /**
      * Test storeData with empty file list.
      */
+    @Test
     public void test_storeData_emptyFileList() throws Exception {
         DataConfig dataConfig = new DataConfig();
         IndexUpdateCallback callback = new TestIndexUpdateCallback();
@@ -372,6 +386,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
      * Test storeData with valid JSON files.
      * This is an integration test that verifies the complete flow including processFile.
      */
+    @Test
     public void test_storeData_withValidFiles() throws Exception {
         Path tempDir = Files.createTempDirectory("jsontest");
         Path jsonFile = Files.createTempFile(tempDir, "test", ".json");
@@ -417,6 +432,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     /**
      * Test that file filtering works correctly - non-JSON files should be ignored.
      */
+    @Test
     public void test_storeData_fileFiltering() throws Exception {
         Path tempDir = Files.createTempDirectory("jsontest");
         Path jsonFile = Files.createTempFile(tempDir, "test", ".json");
@@ -446,6 +462,51 @@ public class JsonDataStoreTest extends UnitDsTestCase {
             Files.deleteIfExists(jsonFile);
             Files.deleteIfExists(txtFile);
             Files.deleteIfExists(tempDir);
+        }
+    }
+
+    /**
+     * Test that getFileList sorts files correctly even when the last-modified
+     * gap between files exceeds Integer.MAX_VALUE milliseconds (~24.8 days),
+     * which previously overflowed the truncated int comparator and reversed
+     * the sort order.
+     */
+    @Test
+    public void test_getFileList_sorting_beyond_int_overflow_threshold() throws Exception {
+        final File tempDir = new File(System.getProperty("java.io.tmpdir"), "json_overflow_sort_test_" + System.nanoTime());
+        tempDir.mkdirs();
+
+        final long day = 24L * 60L * 60L * 1000L;
+        final long base = System.currentTimeMillis() - 400L * day;
+        final File oldest = new File(tempDir, "oldest.json");
+        final File middle = new File(tempDir, "middle.json");
+        final File newest = new File(tempDir, "newest.json");
+
+        try {
+            oldest.createNewFile();
+            middle.createNewFile();
+            newest.createNewFile();
+            oldest.setLastModified(base);
+            middle.setLastModified(base + 30L * day);
+            newest.setLastModified(base + 60L * day);
+
+            final DataStoreParams params = new DataStoreParams();
+            params.put("directories", tempDir.getAbsolutePath());
+
+            final Object result = invokeMethod(dataStore, "getFileList", params);
+
+            @SuppressWarnings("unchecked")
+            final java.util.List<File> fileList = (java.util.List<File>) result;
+
+            assertEquals(3, fileList.size());
+            assertEquals("oldest.json", fileList.get(0).getName());
+            assertEquals("middle.json", fileList.get(1).getName());
+            assertEquals("newest.json", fileList.get(2).getName());
+        } finally {
+            oldest.delete();
+            middle.delete();
+            newest.delete();
+            tempDir.delete();
         }
     }
 
