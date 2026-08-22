@@ -19,8 +19,6 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 
-import java.io.File;
-import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -34,7 +32,6 @@ import org.codelibs.fess.app.service.FailureUrlService;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreCrawlingException;
-import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.helper.CrawlerStatsHelper;
 import org.codelibs.fess.helper.SystemHelper;
 import org.codelibs.fess.opensearch.config.exentity.CrawlingConfig;
@@ -44,8 +41,14 @@ import org.codelibs.fess.util.ComponentUtil;
 
 /**
  * Comprehensive unit tests for JsonDataStore class.
- * Tests cover file detection, encoding handling, JSON/JSONL processing,
- * file list management, and error scenarios.
+ * Tests cover encoding handling, JSON/JSONL processing through the full storeData
+ * pipeline, and error scenarios.
+ *
+ * <p>
+ * Source discovery (file/directory resolution, suffix filtering, sorting) is covered by
+ * {@link JsonSourceResolverTest} instead of here; this class exercises storeData end to
+ * end, including the parts JsonSourceResolverTest cannot reach on its own.
+ * </p>
  *
  * Note: setUp registers SystemHelper, an initialized CrawlerStatsHelper and a recording
  * FailureUrlService stub in the DI container so that storeData tests exercise the full
@@ -106,38 +109,26 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * Test that default file suffixes include .json and .jsonl.
-     */
-    @Test
-    public void test_isDesiredFile_defaultSuffixes() throws Exception {
-        // Test .json files
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", "test.json"));
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", "TEST.JSON"));
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", "data.Json"));
-
-        // Test .jsonl files
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", "test.jsonl"));
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", "TEST.JSONL"));
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", "data.Jsonl"));
-
-        // Test non-JSON files
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", "test.txt"));
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", "test.xml"));
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", "test.csv"));
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", "testjson"));
-    }
-
-    /**
-     * Test setting custom file suffixes.
+     * setFileSuffixes による DI 経由の設定が resolver に伝わることを検証する。
      */
     @Test
     public void test_setFileSuffixes_customSuffixes() throws Exception {
-        dataStore.setFileSuffixes(new String[] { ".data", ".txt" });
+        final Path dir = Files.createTempDirectory("suffix");
+        Files.writeString(dir.resolve("a.ndjson"), "{\"url\":\"http://example.com/1\"}\n");
+        Files.writeString(dir.resolve("b.json"), "{\"url\":\"http://example.com/2\"}\n");
 
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", "test.data"));
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", "test.txt"));
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", "test.json"));
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", "test.jsonl"));
+        dataStore.setFileSuffixes(new String[] { ".ndjson" });
+
+        final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+        final DataStoreParams params = new DataStoreParams();
+        params.put("directories", dir.toString());
+        final Map<String, String> scriptMap = new HashMap<>();
+        scriptMap.put("url", "url");
+
+        dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+        assertEquals("only the .ndjson file is processed", 1, callback.getDataMapList().size());
+        assertEquals("http://example.com/1", callback.getDataMapList().get(0).get("url"));
     }
 
     /**
@@ -159,282 +150,6 @@ public class JsonDataStoreTest extends UnitDsTestCase {
         params.put("fileEncoding", "ISO-8859-1");
         String encoding = invokeMethod(dataStore, "getFileEncoding", params);
         assertEquals("ISO-8859-1", encoding);
-    }
-
-    /**
-     * Test getFileList throws exception when both files and directories are blank.
-     */
-    @Test
-    public void test_getFileList_blankParameters() {
-        DataStoreParams params = new DataStoreParams();
-
-        try {
-            invokeMethod(dataStore, "getFileList", params);
-            fail("Expected DataStoreException");
-        } catch (java.lang.reflect.InvocationTargetException e) {
-            // InvocationTargetException wraps the actual exception
-            Throwable cause = e.getCause();
-            assertTrue("Expected DataStoreException but got: " + cause.getClass().getName(), cause instanceof DataStoreException);
-            assertTrue(cause.getMessage().contains("files") && cause.getMessage().contains("directories"));
-        } catch (Exception e) {
-            fail("Expected InvocationTargetException with DataStoreException but got: " + e.getClass().getName());
-        }
-    }
-
-    /**
-     * Test getFileList with files parameter.
-     */
-    @Test
-    public void test_getFileList_withFilesParameter() throws Exception {
-        // Create temporary test files
-        Path tempDir = Files.createTempDirectory("jsontest");
-        Path jsonFile1 = Files.createTempFile(tempDir, "test1", ".json");
-        Path jsonFile2 = Files.createTempFile(tempDir, "test2", ".jsonl");
-        Path txtFile = Files.createTempFile(tempDir, "test3", ".txt");
-
-        try {
-            Files.write(jsonFile1, "{\"test\": 1}".getBytes());
-            Files.write(jsonFile2, "{\"test\": 2}".getBytes());
-            Files.write(txtFile, "text".getBytes());
-
-            DataStoreParams params = new DataStoreParams();
-            params.put("files", jsonFile1.toString() + "," + jsonFile2.toString() + "," + txtFile.toString());
-
-            Object result = invokeMethod(dataStore, "getFileList", params);
-            assertNotNull(result);
-            assertTrue(result instanceof java.util.List);
-
-            @SuppressWarnings("unchecked")
-            java.util.List<File> fileList = (java.util.List<File>) result;
-
-            // Should only include .json and .jsonl files, not .txt
-            assertEquals(2, fileList.size());
-            assertTrue(fileList.stream().anyMatch(f -> f.getName().endsWith(".json")));
-            assertTrue(fileList.stream().anyMatch(f -> f.getName().endsWith(".jsonl")));
-            assertFalse(fileList.stream().anyMatch(f -> f.getName().endsWith(".txt")));
-
-        } finally {
-            // Clean up
-            Files.deleteIfExists(jsonFile1);
-            Files.deleteIfExists(jsonFile2);
-            Files.deleteIfExists(txtFile);
-            Files.deleteIfExists(tempDir);
-        }
-    }
-
-    /**
-     * Test getFileList with directories parameter.
-     */
-    @Test
-    public void test_getFileList_withDirectoriesParameter() throws Exception {
-        // Create temporary directory with test files
-        Path tempDir = Files.createTempDirectory("jsontest");
-        Path jsonFile1 = Files.createTempFile(tempDir, "test1", ".json");
-        Path jsonFile2 = Files.createTempFile(tempDir, "test2", ".jsonl");
-        Path txtFile = Files.createTempFile(tempDir, "test3", ".txt");
-
-        try {
-            Files.write(jsonFile1, "{\"test\": 1}".getBytes());
-            Files.write(jsonFile2, "{\"test\": 2}".getBytes());
-            Files.write(txtFile, "text".getBytes());
-
-            DataStoreParams params = new DataStoreParams();
-            params.put("directories", tempDir.toString());
-
-            Object result = invokeMethod(dataStore, "getFileList", params);
-            assertNotNull(result);
-            assertTrue(result instanceof java.util.List);
-
-            @SuppressWarnings("unchecked")
-            java.util.List<File> fileList = (java.util.List<File>) result;
-
-            // Should only include .json and .jsonl files from directory
-            assertEquals(2, fileList.size());
-            assertTrue(fileList.stream().anyMatch(f -> f.getName().endsWith(".json")));
-            assertTrue(fileList.stream().anyMatch(f -> f.getName().endsWith(".jsonl")));
-            assertFalse(fileList.stream().anyMatch(f -> f.getName().endsWith(".txt")));
-
-        } finally {
-            // Clean up
-            Files.deleteIfExists(jsonFile1);
-            Files.deleteIfExists(jsonFile2);
-            Files.deleteIfExists(txtFile);
-            Files.deleteIfExists(tempDir);
-        }
-    }
-
-    /**
-     * Test getFileList with multiple directories.
-     */
-    @Test
-    public void test_getFileList_withMultipleDirectories() throws Exception {
-        Path tempDir1 = Files.createTempDirectory("jsontest1");
-        Path tempDir2 = Files.createTempDirectory("jsontest2");
-        Path jsonFile1 = Files.createTempFile(tempDir1, "test1", ".json");
-        Path jsonFile2 = Files.createTempFile(tempDir2, "test2", ".jsonl");
-
-        try {
-            Files.write(jsonFile1, "{\"test\": 1}".getBytes());
-            Files.write(jsonFile2, "{\"test\": 2}".getBytes());
-
-            DataStoreParams params = new DataStoreParams();
-            params.put("directories", tempDir1.toString() + "," + tempDir2.toString());
-
-            Object result = invokeMethod(dataStore, "getFileList", params);
-            assertNotNull(result);
-
-            @SuppressWarnings("unchecked")
-            java.util.List<File> fileList = (java.util.List<File>) result;
-
-            // Should include files from both directories
-            assertEquals(2, fileList.size());
-
-        } finally {
-            // Clean up
-            Files.deleteIfExists(jsonFile1);
-            Files.deleteIfExists(jsonFile2);
-            Files.deleteIfExists(tempDir1);
-            Files.deleteIfExists(tempDir2);
-        }
-    }
-
-    /**
-     * Test getFileList with non-existent file path.
-     */
-    @Test
-    public void test_getFileList_withNonExistentFile() throws Exception {
-        DataStoreParams params = new DataStoreParams();
-        params.put("files", "/nonexistent/path/test.json");
-
-        Object result = invokeMethod(dataStore, "getFileList", params);
-        assertNotNull(result);
-
-        @SuppressWarnings("unchecked")
-        java.util.List<File> fileList = (java.util.List<File>) result;
-
-        // Should return empty list for non-existent files
-        assertTrue(fileList.isEmpty());
-    }
-
-    /**
-     * Test getFileList with non-directory path.
-     */
-    @Test
-    public void test_getFileList_withNonDirectoryPath() throws Exception {
-        Path tempFile = Files.createTempFile("notadir", ".json");
-
-        try {
-            Files.write(tempFile, "{\"test\": 1}".getBytes());
-
-            DataStoreParams params = new DataStoreParams();
-            params.put("directories", tempFile.toString());
-
-            Object result = invokeMethod(dataStore, "getFileList", params);
-            assertNotNull(result);
-
-            @SuppressWarnings("unchecked")
-            java.util.List<File> fileList = (java.util.List<File>) result;
-
-            // Should return empty list when path is not a directory
-            assertTrue(fileList.isEmpty());
-
-        } finally {
-            Files.deleteIfExists(tempFile);
-        }
-    }
-
-    /**
-     * Test file sorting by last modified time.
-     */
-    @Test
-    public void test_getFileList_sortedByModifiedTime() throws Exception {
-        Path tempDir = Files.createTempDirectory("jsontest");
-        Path jsonFile1 = Files.createTempFile(tempDir, "test1", ".json");
-        Path jsonFile2 = Files.createTempFile(tempDir, "test2", ".json");
-        Path jsonFile3 = Files.createTempFile(tempDir, "test3", ".json");
-
-        try {
-            // Write files and ensure different modification times
-            Files.write(jsonFile1, "{\"id\": 1}".getBytes());
-            Thread.sleep(100);
-            Files.write(jsonFile2, "{\"id\": 2}".getBytes());
-            Thread.sleep(100);
-            Files.write(jsonFile3, "{\"id\": 3}".getBytes());
-
-            DataStoreParams params = new DataStoreParams();
-            params.put("directories", tempDir.toString());
-
-            Object result = invokeMethod(dataStore, "getFileList", params);
-
-            @SuppressWarnings("unchecked")
-            java.util.List<File> fileList = (java.util.List<File>) result;
-
-            assertEquals(3, fileList.size());
-
-            // Files should be sorted by modification time (oldest first)
-            long prevTime = 0;
-            for (File f : fileList) {
-                long currentTime = f.lastModified();
-                assertTrue(currentTime >= prevTime);
-                prevTime = currentTime;
-            }
-
-        } finally {
-            Files.deleteIfExists(jsonFile1);
-            Files.deleteIfExists(jsonFile2);
-            Files.deleteIfExists(jsonFile3);
-            Files.deleteIfExists(tempDir);
-        }
-    }
-
-    /**
-     * カンマ区切りのパスに前後の空白があっても解決できることを検証する。
-     */
-    @Test
-    public void test_getFileList_withFilesParameter_trimsWhitespace() throws Exception {
-        final Path tempDir = Files.createTempDirectory("jsontrim");
-        final Path a = Files.createFile(tempDir.resolve("a.json"));
-        final Path b = Files.createFile(tempDir.resolve("b.jsonl"));
-
-        try {
-            final DataStoreParams params = new DataStoreParams();
-            params.put("files", a + " , " + b);
-
-            final Method method = JsonDataStore.class.getDeclaredMethod("getFileList", DataStoreParams.class);
-            method.setAccessible(true);
-            @SuppressWarnings("unchecked")
-            final List<File> fileList = (List<File>) method.invoke(dataStore, params);
-
-            assertEquals("both paths resolve after trimming", 2, fileList.size());
-        } finally {
-            Files.deleteIfExists(a);
-            Files.deleteIfExists(b);
-            Files.deleteIfExists(tempDir);
-        }
-    }
-
-    /**
-     * ディレクトリ指定でも前後の空白と空要素を許容することを検証する。
-     */
-    @Test
-    public void test_getFileList_withDirectoriesParameter_trimsWhitespace() throws Exception {
-        final Path tempDir = Files.createTempDirectory("jsontrimdir");
-        Files.createFile(tempDir.resolve("a.json"));
-
-        try {
-            final DataStoreParams params = new DataStoreParams();
-            params.put("directories", " " + tempDir + " , ");
-
-            final Method method = JsonDataStore.class.getDeclaredMethod("getFileList", DataStoreParams.class);
-            method.setAccessible(true);
-            @SuppressWarnings("unchecked")
-            final List<File> fileList = (List<File>) method.invoke(dataStore, params);
-
-            assertEquals("whitespace-only element is skipped, directory resolves", 1, fileList.size());
-        } finally {
-            Files.deleteIfExists(tempDir.resolve("a.json"));
-            Files.deleteIfExists(tempDir);
-        }
     }
 
     /**
@@ -532,51 +247,6 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * Test that getFileList sorts files correctly even when the last-modified
-     * gap between files exceeds Integer.MAX_VALUE milliseconds (~24.8 days),
-     * which previously overflowed the truncated int comparator and reversed
-     * the sort order.
-     */
-    @Test
-    public void test_getFileList_sorting_beyond_int_overflow_threshold() throws Exception {
-        final File tempDir = new File(System.getProperty("java.io.tmpdir"), "json_overflow_sort_test_" + System.nanoTime());
-        tempDir.mkdirs();
-
-        final long day = 24L * 60L * 60L * 1000L;
-        final long base = System.currentTimeMillis() - 400L * day;
-        final File oldest = new File(tempDir, "oldest.json");
-        final File middle = new File(tempDir, "middle.json");
-        final File newest = new File(tempDir, "newest.json");
-
-        try {
-            oldest.createNewFile();
-            middle.createNewFile();
-            newest.createNewFile();
-            oldest.setLastModified(base);
-            middle.setLastModified(base + 30L * day);
-            newest.setLastModified(base + 60L * day);
-
-            final DataStoreParams params = new DataStoreParams();
-            params.put("directories", tempDir.getAbsolutePath());
-
-            final Object result = invokeMethod(dataStore, "getFileList", params);
-
-            @SuppressWarnings("unchecked")
-            final java.util.List<File> fileList = (java.util.List<File>) result;
-
-            assertEquals(3, fileList.size());
-            assertEquals("oldest.json", fileList.get(0).getName());
-            assertEquals("middle.json", fileList.get(1).getName());
-            assertEquals("newest.json", fileList.get(2).getName());
-        } finally {
-            oldest.delete();
-            middle.delete();
-            newest.delete();
-            tempDir.delete();
-        }
-    }
-
-    /**
      * 空行・空白行が失敗として記録されずスキップされることを検証する。
      */
     @Test
@@ -635,8 +305,16 @@ public class JsonDataStoreTest extends UnitDsTestCase {
 
     /**
      * BOM-only first line followed by real records should result in no failures.
-     * This test enforces that BOM stripping occurs BEFORE the blank line check,
-     * so that a line containing only a BOM is correctly treated as blank and skipped.
+     *
+     * <p>
+     * This test originally pinned that BOM stripping ran before an explicit blank-line
+     * check, i.e. that a line containing only a BOM was treated as blank and skipped. The
+     * streaming reader strips the BOM once at stream open, and Jackson's tokenizer simply
+     * skips whitespace between values, so that ordered pair of checks no longer exists as a
+     * code path to pin. What the test still verifies, and what still matters, is the
+     * observable behaviour: a BOM-prefixed file with a leading blank line indexes both real
+     * records with no failures.
+     * </p>
      */
     @Test
     public void test_storeData_bomOnlyFirstLineThenRecords() throws Exception {
@@ -692,7 +370,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * alive をファイルループの外側だけでなく processFile 内のレコードループでも
+     * alive をファイルループの外側だけでなく processSource 内のレコードループでも
      * 見ていることを検証する。1件目を store() した直後に stop() を呼び、2件目が
      * 処理されないことを、件数だけでなく内容（1件目の url）でも確認する。件数だけの
      * 比較だと、内側の alive チェックが失われて2件目が残ってしまっても検出できない。
@@ -765,7 +443,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
 
     /**
      * DataStoreCrawlingException(url, message, cause, true) が store() から投げられたとき、
-     * processFile のレコードループとファイルループの両方が break することを検証する。
+     * processSource のレコードループとソースループの両方が break することを検証する。
      * 1ファイル目に2件、2ファイル目に1件のレコードを置き、1件目の store() で abort する
      * コールバックを使う。2ファイル目は決して開かれないため、試みられるレコードは1件だけ。
      * failureUrls の errorName が例外そのものではなく cause (IllegalStateException) から、
@@ -815,7 +493,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
 
             dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
 
-            assertEquals("only the first record is attempted: the record loop breaks on abort and the file loop "
+            assertEquals("only the first record is attempted: the record loop breaks on abort and the source loop "
                     + "breaks too, so file2's record is never reached: " + attempted, 1, attempted.size());
             assertEquals("exactly one failure is recorded: " + failureUrls, 1, failureUrls.size());
             assertEquals(
@@ -830,10 +508,11 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 空行を挟んでも行カウンタが実ファイルの行番号を追い続けることを検証する。1行目は
+     * 空行を挟んでも行番号が実ファイルの行番号を追い続けることを検証する。1行目は
      * 正常なレコード、2行目は空行、3行目は不正な JSON。記録される失敗の id が "@2" では
-     * なく "@3" で終わることを確認する。count++ が空行スキップ判定より前で行われている
-     * 必要があり、そうでなければ失敗はエディタ上の実際の行を指さなくなる。
+     * なく "@3" で終わることを確認する。JsonRecordReader#getCurrentLineNumber() が返す
+     * 行番号をレコードカウンタの代わりに使う必要があり、そうでなければ失敗はエディタ上の
+     * 実際の行を指さなくなる。
      */
     @Test
     public void test_storeData_lineNumberTracksRealLinesAcrossBlank() throws Exception {
@@ -860,6 +539,54 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
+     * JSON 配列ファイルが全レコード登録されることを検証する。
+     */
+    @Test
+    public void test_storeData_jsonArrayFile() throws Exception {
+        final Path file = Files.createTempFile("array", ".json");
+        Files.writeString(file, "[\n  {\"url\":\"http://example.com/1\"},\n  {\"url\":\"http://example.com/2\"}\n]\n");
+
+        try {
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("both array elements are stored", 2, callback.getDataMapList().size());
+            assertEquals("no failures: " + failureUrls, 0, failureUrls.size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * root_path でネストした配列を取り出せることを検証する。
+     */
+    @Test
+    public void test_storeData_rootPath() throws Exception {
+        final Path file = Files.createTempFile("nested", ".json");
+        Files.writeString(file, "{\"data\":{\"items\":[{\"url\":\"http://example.com/1\"},{\"url\":\"http://example.com/2\"}]}}");
+
+        try {
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            params.put("root_path", "/data/items");
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("both nested elements are stored", 2, callback.getDataMapList().size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
      * Helper method to invoke private methods using reflection.
      */
 
@@ -868,10 +595,6 @@ public class JsonDataStoreTest extends UnitDsTestCase {
         Class<?>[] paramTypes = new Class<?>[args.length];
         for (int i = 0; i < args.length; i++) {
             paramTypes[i] = args[i].getClass();
-            // Handle primitive types
-            if (paramTypes[i] == File.class && args[i].getClass() != File.class) {
-                paramTypes[i] = File.class;
-            }
         }
 
         java.lang.reflect.Method method = null;

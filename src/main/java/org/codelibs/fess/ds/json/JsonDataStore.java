@@ -15,26 +15,15 @@
  */
 package org.codelibs.fess.ds.json;
 
-import static org.codelibs.core.stream.StreamUtil.stream;
-
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
+import java.io.InputStream;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codelibs.core.lang.StringUtil;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.app.service.FailureUrlService;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
@@ -50,9 +39,6 @@ import org.codelibs.fess.helper.CrawlerStatsHelper.StatsKeyObject;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.util.ComponentUtil;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
 /**
  * JSON Data Store implementation for Fess that processes JSON and JSONL files.
  * This data store extends AbstractDataStore to provide functionality for crawling
@@ -60,7 +46,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  *
  * <p>Supported file formats:</p>
  * <ul>
- * <li>.json - Standard JSON files</li>
+ * <li>.json - Standard JSON files, either a single object or an array of objects</li>
  * <li>.jsonl - JSON Lines format (one JSON object per line)</li>
  * </ul>
  *
@@ -69,6 +55,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  * <li>files - Comma-separated list of file paths to process</li>
  * <li>directories - Comma-separated list of directory paths to scan</li>
  * <li>fileEncoding - Character encoding for files (default: UTF-8)</li>
+ * <li>format - Document shape: auto, jsonl or json (default: auto)</li>
+ * <li>root_path - JSON Pointer selecting a nested array to read records from</li>
  * </ul>
  */
 public class JsonDataStore extends AbstractDataStore {
@@ -76,19 +64,11 @@ public class JsonDataStore extends AbstractDataStore {
 
     private static final String FILE_ENCODING_PARAM = "fileEncoding";
 
-    private static final String FILES_PARAM = "files";
+    /** Document shape: auto, jsonl or json. */
+    protected static final String FORMAT_PARAM = "format";
 
-    private static final String DIRS_PARAM = "directories";
-
-    /** Zero-width no-break space, i.e. the character a UTF-8 BOM decodes to. */
-    private static final char BOM_CHAR = '\uFEFF';
-
-    /** Reused across every record; never reconfigured, which is Jackson's condition for sharing a mapper. */
-    private final ObjectMapper objectMapper = new ObjectMapper();
-
-    /** Reused across every record to avoid a per-record allocation for the same generic type. */
-    private final TypeReference<Map<String, Object>> mapTypeReference = new TypeReference<Map<String, Object>>() {
-    };
+    /** JSON Pointer selecting a nested array. */
+    protected static final String ROOT_PATH_PARAM = "root_path";
 
     private String[] fileSuffixes = { ".json", ".jsonl" };
 
@@ -109,104 +89,32 @@ public class JsonDataStore extends AbstractDataStore {
     protected void storeData(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap) {
         final String fileEncoding = getFileEncoding(paramMap);
-        final List<File> fileList = getFileList(paramMap);
+        final List<JsonSource> sourceList = createSourceResolver().resolve(paramMap);
 
-        if (fileList.isEmpty()) {
-            logger.warn("No files to process");
+        if (sourceList.isEmpty()) {
+            logger.warn("No sources to process");
             return;
         }
 
-        for (final File file : fileList) {
+        for (final JsonSource source : sourceList) {
             if (!alive) {
-                logger.info("Stopped crawling: {}", file.getAbsolutePath());
+                logger.info("Stopped crawling: {}", source.getName());
                 break;
             }
-            if (!processFile(dataConfig, callback, paramMap, scriptMap, defaultDataMap, file, fileEncoding)) {
-                // The data store was asked to abort on this record; stop reading further files.
+            if (!processSource(dataConfig, callback, paramMap, scriptMap, defaultDataMap, source, fileEncoding)) {
+                // The data store was asked to abort on this record; stop reading further sources.
                 break;
             }
         }
     }
 
     /**
-     * Resolves the files this data store should process from the {@value #FILES_PARAM} or
-     * {@value #DIRS_PARAM} parameter. When {@value #FILES_PARAM} is blank, falls back to
-     * {@value #DIRS_PARAM}, collecting the matching files from each directory and sorting
-     * them by last modified time (oldest first). Paths that do not exist, are not a file or
-     * directory as expected, or whose suffix is not one of {@link #fileSuffixes} are skipped
-     * with a warning rather than failing the whole crawl.
+     * Creates the resolver that turns parameters into sources.
      *
-     * @param paramMap the data store parameters
-     * @return the resolved list of files to process, oldest-modified first
+     * @return a resolver seeded with this data store's default file suffixes
      */
-    private List<File> getFileList(final DataStoreParams paramMap) {
-        String value = paramMap.getAsString(FILES_PARAM);
-        final List<File> fileList = new ArrayList<>();
-        if (StringUtil.isBlank(value)) {
-            value = paramMap.getAsString(DIRS_PARAM);
-            if (StringUtil.isBlank(value)) {
-                throw new DataStoreException(FILES_PARAM + " and " + DIRS_PARAM + " are blank.");
-            }
-            logger.info("{}={}", DIRS_PARAM, value);
-            final String[] values = splitPaths(value);
-            for (final String path : values) {
-                final File dir = new File(path);
-                if (!dir.exists()) {
-                    logger.warn("{} does not exist.", path);
-                } else if (!dir.isDirectory()) {
-                    logger.warn("{} is not a directory.", path);
-                } else {
-                    stream(dir.listFiles()).of(stream -> stream.filter(f -> isDesiredFile(f.getName()))
-                            .sorted(Comparator.comparingLong(File::lastModified))
-                            .forEach(fileList::add));
-                }
-            }
-        } else {
-            logger.info("{}={}", FILES_PARAM, value);
-            final String[] values = splitPaths(value);
-            for (final String path : values) {
-                final File file = new File(path);
-                if (!file.exists()) {
-                    logger.warn("{} does not exist.", path);
-                } else if (!file.isFile()) {
-                    logger.warn("{} is not a file.", path);
-                } else if (!isDesiredFile(file.getName())) {
-                    logger.warn("{} is skipped because its suffix is not one of {}.", path, Arrays.toString(fileSuffixes));
-                } else {
-                    fileList.add(file);
-                }
-            }
-        }
-        if (fileList.isEmpty() && logger.isDebugEnabled()) {
-            logger.debug("No files in {}", value);
-        }
-        return fileList;
-    }
-
-    /**
-     * Splits a comma-separated parameter value and drops blank elements.
-     *
-     * @param value comma-separated value
-     * @return trimmed, non-blank elements
-     */
-    private String[] splitPaths(final String value) {
-        return stream(value.split(",")).get(stream -> stream.map(String::trim).filter(StringUtil::isNotBlank).toArray(n -> new String[n]));
-    }
-
-    /**
-     * Determines whether a file name has one of the configured suffixes.
-     *
-     * @param filename the file name to check
-     * @return {@code true} if the name ends with one of {@link #fileSuffixes}
-     */
-    private boolean isDesiredFile(final String filename) {
-        final String name = filename.toLowerCase(Locale.ROOT);
-        for (final String suffix : fileSuffixes) {
-            if (name.endsWith(suffix)) {
-                return true;
-            }
-        }
-        return false;
+    protected JsonSourceResolver createSourceResolver() {
+        return new JsonSourceResolver(fileSuffixes);
     }
 
     private String getFileEncoding(final DataStoreParams paramMap) {
@@ -214,45 +122,59 @@ public class JsonDataStore extends AbstractDataStore {
     }
 
     /**
-     * Processes a single file and stores each record through the callback.
+     * Reads one source and stores each of its records.
      *
-     * @param dataConfig the data store configuration
+     * @param dataConfig the data configuration being crawled
      * @param callback the index update callback
      * @param paramMap the data store parameters
-     * @param scriptMap the script mappings for field conversion
-     * @param defaultDataMap the default data values
-     * @param file the file to process
-     * @param fileEncoding the character encoding of the file
-     * @return {@code false} if crawling must stop, {@code true} to continue with the next file
+     * @param scriptMap the field-to-script mapping
+     * @param defaultDataMap the base document
+     * @param source the source to read
+     * @param fileEncoding the character encoding
+     * @return {@code false} if crawling must stop, {@code true} to continue with the next source
      */
-    private boolean processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
-            final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap, final File file, final String fileEncoding) {
+    protected boolean processSource(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
+            final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap, final JsonSource source,
+            final String fileEncoding) {
         final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
-
         final String scriptType = getScriptType(paramMap);
-        logger.info("Loading {}", file.getAbsolutePath());
+        final JsonRecordReader.Format format = JsonRecordReader.parseFormat(paramMap.getAsString(FORMAT_PARAM));
+        final String rootPath = paramMap.getAsString(ROOT_PATH_PARAM);
+        final long readInterval = getReadInterval(paramMap);
         boolean aborted = false;
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(file), fileEncoding))) {
+
+        logger.info("Loading {}", source.getName());
+        try (JsonSource openSource = source;
+                InputStream in = openSource.openStream();
+                JsonRecordReader reader = new JsonRecordReader(in, fileEncoding, format, rootPath)) {
             int count = 0;
-            for (String line; alive && (line = br.readLine()) != null;) {
+            while (alive && reader.hasNext()) {
                 count++;
-                if (count == 1) {
-                    line = stripBom(line);
+                // reader.next() is attempted here, before the stats key exists, because
+                // getCurrentLineNumber() only reflects the record this call just attempted -
+                // JsonRecordReader records the line a record starts on right before parsing it,
+                // so reading the line number any earlier would still report the PREVIOUS
+                // record's line. next() sets that line even when it throws (the malformed-JSON
+                // case), so capturing the failure here and re-throwing it below still reports
+                // the real line the broken record starts on rather than the record ordinal.
+                Map<String, Object> record = null;
+                Throwable readFailure = null;
+                try {
+                    record = reader.next();
+                } catch (final Throwable t) {
+                    readFailure = t;
                 }
-                if (StringUtil.isBlank(line)) {
-                    // A blank line is not a record. Skipping it silently keeps it out of
-                    // the failure URL list, matching how CsvDataStore treats empty rows.
-                    continue;
-                }
-                final StatsKeyObject statsKey = new StatsKeyObject(file.getAbsolutePath() + "@" + count);
+                final int lineNumber = reader.getCurrentLineNumber();
+                final StatsKeyObject statsKey = new StatsKeyObject(source.getName() + "@" + (lineNumber >= 0 ? lineNumber : count));
                 paramMap.put(Constants.CRAWLER_STATS_KEY, statsKey);
                 final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
                 try {
                     crawlerStatsHelper.begin(statsKey);
-                    final Map<String, Object> source = objectMapper.readValue(line, mapTypeReference);
+                    if (readFailure != null) {
+                        throw readFailure;
+                    }
                     final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap.asMap());
-
-                    resultMap.putAll(source);
+                    resultMap.putAll(record);
 
                     crawlerStatsHelper.record(statsKey, StatsAction.PREPARED);
 
@@ -272,93 +194,91 @@ public class JsonDataStore extends AbstractDataStore {
                     callback.store(paramMap, dataMap);
                     crawlerStatsHelper.record(statsKey, StatsAction.FINISHED);
                 } catch (final CrawlingAccessException e) {
-                    logger.warn("Crawling Access Exception at : {}", dataMap, e);
-
-                    Throwable target = e;
-                    if (target instanceof final MultipleCrawlingAccessException ex) {
-                        final Throwable[] causes = ex.getCauses();
-                        if (causes.length > 0) {
-                            target = causes[causes.length - 1];
-                        }
+                    aborted = handleCrawlingAccessException(dataConfig, crawlerStatsHelper, statsKey, dataMap, e);
+                    if (aborted) {
+                        crawlerStatsHelper.done(statsKey);
+                        break;
                     }
-
-                    String errorName;
-                    final Throwable cause = target.getCause();
-                    if (cause != null) {
-                        errorName = cause.getClass().getCanonicalName();
-                    } else {
-                        errorName = target.getClass().getCanonicalName();
-                    }
-
-                    String url = statsKey.getId();
-                    if (target instanceof final DataStoreCrawlingException dce) {
-                        if (dce.getUrl() != null) {
-                            url = dce.getUrl();
-                        }
-                        if (dce.aborted()) {
-                            aborted = true;
-                        }
-                    }
-
-                    final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
-                    failureUrlService.store(dataConfig, errorName, url, target);
-                    crawlerStatsHelper.record(statsKey, StatsAction.ACCESS_EXCEPTION);
                 } catch (final Throwable t) {
                     logger.warn("Crawling Access Exception at : {}", dataMap, t);
                     final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
                     failureUrlService.store(dataConfig, t.getClass().getCanonicalName(), statsKey.getId(), t);
                     crawlerStatsHelper.record(statsKey, StatsAction.EXCEPTION);
                 } finally {
-                    // Call done() exactly once per record regardless of the outcome above, then break
-                    // out of the loop afterwards if the exception handler asked us to abort - avoids
-                    // the harmless-but-confusing double done() call that calling it again before break
-                    // would cause (CrawlerStatsHelper#done treats a second call as a silent no-op).
                     crawlerStatsHelper.done(statsKey);
                 }
-                if (aborted) {
+                if (readInterval > 0) {
+                    sleep(readInterval);
+                }
+                if (readFailure != null) {
+                    // Unlike a line-based format, a JSON stream cannot resynchronize after a
+                    // malformed record: the underlying parser is left mid-token, and every
+                    // further hasNext()/next() call only advances one invalid character at a
+                    // time, throwing again rather than finding the next well-formed record (or
+                    // even reliably detecting end of stream). The failure above already reports
+                    // this record; stop reading the rest of this source instead of repeating it.
                     break;
                 }
             }
-        } catch (final FileNotFoundException e) {
-            logger.warn("Source file {} does not exist.", file, e);
-            recordFileFailure(dataConfig, file, e);
         } catch (final IOException e) {
-            logger.warn("IO Error occurred while reading source file {}.", file, e);
-            recordFileFailure(dataConfig, file, e);
+            logger.warn("Failed to read {}.", source.getName(), e);
+            recordSourceFailure(dataConfig, source, e);
+        } catch (final DataStoreException e) {
+            logger.warn("Failed to parse {}.", source.getName(), e);
+            recordSourceFailure(dataConfig, source, e);
         }
         return !aborted;
     }
 
     /**
-     * Records a file-level failure so that a crawl which could not read one of its inputs
-     * is not reported as fully successful.
+     * Records a crawling access failure and reports whether crawling must stop.
      *
      * @param dataConfig the data configuration being crawled
-     * @param file the file that could not be read
-     * @param e the cause
+     * @param crawlerStatsHelper the statistics helper
+     * @param statsKey the statistics key for this record
+     * @param dataMap the partially built document, for logging
+     * @param e the failure
+     * @return {@code true} if the exception asked the crawl to abort
      */
-    private void recordFileFailure(final DataConfig dataConfig, final File file, final Throwable e) {
-        final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
-        failureUrlService.store(dataConfig, e.getClass().getCanonicalName(), file.getAbsolutePath(), e);
+    private boolean handleCrawlingAccessException(final DataConfig dataConfig, final CrawlerStatsHelper crawlerStatsHelper,
+            final StatsKeyObject statsKey, final Map<String, Object> dataMap, final CrawlingAccessException e) {
+        logger.warn("Crawling Access Exception at : {}", dataMap, e);
+
+        Throwable target = e;
+        if (target instanceof final MultipleCrawlingAccessException ex) {
+            final Throwable[] causes = ex.getCauses();
+            if (causes.length > 0) {
+                target = causes[causes.length - 1];
+            }
+        }
+
+        final Throwable cause = target.getCause();
+        final String errorName = cause != null ? cause.getClass().getCanonicalName() : target.getClass().getCanonicalName();
+
+        String url = statsKey.getId();
+        boolean aborted = false;
+        if (target instanceof final DataStoreCrawlingException dce) {
+            if (dce.getUrl() != null) {
+                url = dce.getUrl();
+            }
+            aborted = dce.aborted();
+        }
+
+        ComponentUtil.getComponent(FailureUrlService.class).store(dataConfig, errorName, url, target);
+        crawlerStatsHelper.record(statsKey, StatsAction.ACCESS_EXCEPTION);
+        return aborted;
     }
 
     /**
-     * Removes a leading byte order mark from the first line of a file.
+     * Records a source-level failure so that a crawl which could not read one of its
+     * inputs is not reported as fully successful.
      *
-     * <p>
-     * {@link InputStreamReader} decodes a UTF-8 BOM to U+FEFF and hands it to the caller
-     * rather than discarding it, which makes the first JSON object of a BOM-prefixed file
-     * unparseable.
-     * </p>
-     *
-     * @param line the line to clean
-     * @return the line without a leading BOM
+     * @param dataConfig the data configuration being crawled
+     * @param source the source that could not be read
+     * @param e the cause
      */
-    private String stripBom(final String line) {
-        if (!line.isEmpty() && line.charAt(0) == BOM_CHAR) {
-            return line.substring(1);
-        }
-        return line;
+    private void recordSourceFailure(final DataConfig dataConfig, final JsonSource source, final Throwable e) {
+        ComponentUtil.getComponent(FailureUrlService.class).store(dataConfig, e.getClass().getCanonicalName(), source.getName(), e);
     }
 
     /**
