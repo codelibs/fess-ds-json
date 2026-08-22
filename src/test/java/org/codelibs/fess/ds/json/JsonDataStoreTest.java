@@ -15,11 +15,11 @@
  */
 package org.codelibs.fess.ds.json;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 
 import java.io.File;
-import java.io.IOException;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -41,7 +41,6 @@ import org.codelibs.fess.opensearch.config.exentity.CrawlingConfig;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.opensearch.config.exentity.FailureUrl;
 import org.codelibs.fess.util.ComponentUtil;
-import org.codelibs.fess.ds.json.UnitDsTestCase;
 
 /**
  * Comprehensive unit tests for JsonDataStore class.
@@ -444,7 +443,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     @Test
     public void test_storeData_emptyFileList() throws Exception {
         DataConfig dataConfig = new DataConfig();
-        IndexUpdateCallback callback = new TestIndexUpdateCallback();
+        TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
         DataStoreParams params = new DataStoreParams();
         Map<String, String> scriptMap = new HashMap<>();
         Map<String, Object> defaultDataMap = new HashMap<>();
@@ -455,8 +454,8 @@ public class JsonDataStoreTest extends UnitDsTestCase {
         // This should log a warning and return without processing
         dataStore.storeData(dataConfig, callback, params, scriptMap, defaultDataMap);
 
-        // No exception should be thrown
-        assertTrue(true);
+        // The callback must not receive anything when there is nothing to process.
+        assertTrue("callback should receive no records for an empty file list", callback.getDataMapList().isEmpty());
     }
 
     /**
@@ -736,17 +735,21 @@ public class JsonDataStoreTest extends UnitDsTestCase {
         final Path dir = Files.createTempDirectory("unreadable");
         final Path good = dir.resolve("good.jsonl");
         final Path bad = dir.resolve("bad.jsonl");
-        Files.writeString(good, "{\"url\":\"http://example.com/1\"}\n");
-        Files.writeString(bad, "{\"url\":\"http://example.com/2\"}\n");
-        assertTrue("the file must become unreadable", bad.toFile().setReadable(false, false));
-
-        final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
-        final DataStoreParams params = new DataStoreParams();
-        params.put("files", good + "," + bad);
-        final Map<String, String> scriptMap = new HashMap<>();
-        scriptMap.put("url", "url");
 
         try {
+            Files.writeString(good, "{\"url\":\"http://example.com/1\"}\n");
+            Files.writeString(bad, "{\"url\":\"http://example.com/2\"}\n");
+            assertTrue("the file must become unreadable", bad.toFile().setReadable(false, false));
+            // setReadable(false, ...) is a silent no-op for the file's owner when running as
+            // root (e.g. inside a root Docker container), so self-skip rather than go red.
+            Assumptions.assumeTrue(!Files.isReadable(bad), "cannot make file unreadable (running as root?)");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", good + "," + bad);
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
             dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
 
             assertEquals("the readable file is still processed", 1, callback.getDataMapList().size());

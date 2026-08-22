@@ -86,6 +86,10 @@ public class JsonDataStore extends AbstractDataStore {
     /** Reused across every record; never reconfigured, which is Jackson's condition for sharing a mapper. */
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    /** Reused across every record to avoid a per-record allocation for the same generic type. */
+    private final TypeReference<Map<String, Object>> mapTypeReference = new TypeReference<Map<String, Object>>() {
+    };
+
     private String[] fileSuffixes = { ".json", ".jsonl" };
 
     /**
@@ -124,6 +128,17 @@ public class JsonDataStore extends AbstractDataStore {
         }
     }
 
+    /**
+     * Resolves the files this data store should process from the {@value #FILES_PARAM} or
+     * {@value #DIRS_PARAM} parameter. When {@value #FILES_PARAM} is blank, falls back to
+     * {@value #DIRS_PARAM}, collecting the matching files from each directory and sorting
+     * them by last modified time (oldest first). Paths that do not exist, are not a file or
+     * directory as expected, or whose suffix is not one of {@link #fileSuffixes} are skipped
+     * with a warning rather than failing the whole crawl.
+     *
+     * @param paramMap the data store parameters
+     * @return the resolved list of files to process, oldest-modified first
+     */
     private List<File> getFileList(final DataStoreParams paramMap) {
         String value = paramMap.getAsString(FILES_PARAM);
         final List<File> fileList = new ArrayList<>();
@@ -136,12 +151,14 @@ public class JsonDataStore extends AbstractDataStore {
             final String[] values = splitPaths(value);
             for (final String path : values) {
                 final File dir = new File(path);
-                if (dir.isDirectory()) {
+                if (!dir.exists()) {
+                    logger.warn("{} does not exist.", path);
+                } else if (!dir.isDirectory()) {
+                    logger.warn("{} is not a directory.", path);
+                } else {
                     stream(dir.listFiles()).of(stream -> stream.filter(f -> isDesiredFile(f.getName()))
                             .sorted(Comparator.comparingLong(File::lastModified))
                             .forEach(fileList::add));
-                } else {
-                    logger.warn("{} is not a directory.", path);
                 }
             }
         } else {
@@ -232,8 +249,7 @@ public class JsonDataStore extends AbstractDataStore {
                 final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
                 try {
                     crawlerStatsHelper.begin(statsKey);
-                    final Map<String, Object> source = objectMapper.readValue(line, new TypeReference<Map<String, Object>>() {
-                    });
+                    final Map<String, Object> source = objectMapper.readValue(line, mapTypeReference);
                     final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap.asMap());
 
                     resultMap.putAll(source);
@@ -326,7 +342,6 @@ public class JsonDataStore extends AbstractDataStore {
         failureUrlService.store(dataConfig, e.getClass().getCanonicalName(), file.getAbsolutePath(), e);
     }
 
-    /** Zero-width no-break space, i.e. the character a UTF-8 BOM decodes to. */
     /**
      * Removes a leading byte order mark from the first line of a file.
      *
