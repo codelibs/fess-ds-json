@@ -20,6 +20,7 @@ import org.junit.jupiter.api.TestInfo;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -384,6 +385,56 @@ public class JsonDataStoreTest extends UnitDsTestCase {
             Files.deleteIfExists(jsonFile1);
             Files.deleteIfExists(jsonFile2);
             Files.deleteIfExists(jsonFile3);
+            Files.deleteIfExists(tempDir);
+        }
+    }
+
+    /**
+     * カンマ区切りのパスに前後の空白があっても解決できることを検証する。
+     */
+    @Test
+    public void test_getFileList_withFilesParameter_trimsWhitespace() throws Exception {
+        final Path tempDir = Files.createTempDirectory("jsontrim");
+        final Path a = Files.createFile(tempDir.resolve("a.json"));
+        final Path b = Files.createFile(tempDir.resolve("b.jsonl"));
+
+        try {
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", a + " , " + b);
+
+            final Method method = JsonDataStore.class.getDeclaredMethod("getFileList", DataStoreParams.class);
+            method.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            final List<File> fileList = (List<File>) method.invoke(dataStore, params);
+
+            assertEquals("both paths resolve after trimming", 2, fileList.size());
+        } finally {
+            Files.deleteIfExists(a);
+            Files.deleteIfExists(b);
+            Files.deleteIfExists(tempDir);
+        }
+    }
+
+    /**
+     * ディレクトリ指定でも前後の空白と空要素を許容することを検証する。
+     */
+    @Test
+    public void test_getFileList_withDirectoriesParameter_trimsWhitespace() throws Exception {
+        final Path tempDir = Files.createTempDirectory("jsontrimdir");
+        Files.createFile(tempDir.resolve("a.json"));
+
+        try {
+            final DataStoreParams params = new DataStoreParams();
+            params.put("directories", " " + tempDir + " , ");
+
+            final Method method = JsonDataStore.class.getDeclaredMethod("getFileList", DataStoreParams.class);
+            method.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            final List<File> fileList = (List<File>) method.invoke(dataStore, params);
+
+            assertEquals("whitespace-only element is skipped, directory resolves", 1, fileList.size());
+        } finally {
+            Files.deleteIfExists(tempDir.resolve("a.json"));
             Files.deleteIfExists(tempDir);
         }
     }

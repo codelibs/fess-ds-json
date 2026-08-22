@@ -116,7 +116,7 @@ public class JsonDataStore extends AbstractDataStore {
                 throw new DataStoreException(FILES_PARAM + " and " + DIRS_PARAM + " are blank.");
             }
             logger.info("{}={}", DIRS_PARAM, value);
-            final String[] values = value.split(",");
+            final String[] values = splitPaths(value);
             for (final String path : values) {
                 final File dir = new File(path);
                 if (dir.isDirectory()) {
@@ -129,7 +129,7 @@ public class JsonDataStore extends AbstractDataStore {
             }
         } else {
             logger.info("{}={}", FILES_PARAM, value);
-            final String[] values = value.split(",");
+            final String[] values = splitPaths(value);
             for (final String path : values) {
                 final File file = new File(path);
                 if (file.isFile() && isDesiredFile(file.getParentFile(), file.getName())) {
@@ -143,6 +143,16 @@ public class JsonDataStore extends AbstractDataStore {
             logger.debug("No files in {}", value);
         }
         return fileList;
+    }
+
+    /**
+     * Splits a comma-separated parameter value and drops blank elements.
+     *
+     * @param value comma-separated value
+     * @return trimmed, non-blank elements
+     */
+    private String[] splitPaths(final String value) {
+        return stream(value.split(",")).get(stream -> stream.map(String::trim).filter(StringUtil::isNotBlank).toArray(n -> new String[n]));
     }
 
     private boolean isDesiredFile(final File parentFile, final String filename) {
