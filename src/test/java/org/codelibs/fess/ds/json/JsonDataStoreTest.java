@@ -579,6 +579,32 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
+     * 空行・空白行が失敗として記録されずスキップされることを検証する。
+     */
+    @Test
+    public void test_storeData_skipsBlankLines() throws Exception {
+        final Path file = Files.createTempFile("blank", ".jsonl");
+
+        try {
+            Files.writeString(file,
+                    "{\"url\":\"http://example.com/1\"}\n" + "\n" + "   \n" + "{\"url\":\"http://example.com/2\"}\n" + "\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("two records are stored", 2, callback.getDataMapList().size());
+            assertEquals("blank lines are not recorded as failures: " + failureUrls, 0, failureUrls.size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
      * Helper method to invoke private methods using reflection.
      */
     @SuppressWarnings("unchecked")

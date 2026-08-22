@@ -180,6 +180,11 @@ public class JsonDataStore extends AbstractDataStore {
             int count = 0;
             for (String line; (line = br.readLine()) != null;) {
                 count++;
+                if (StringUtil.isBlank(line)) {
+                    // A blank line is not a record. Skipping it silently keeps it out of
+                    // the failure URL list, matching how CsvDataStore treats empty rows.
+                    continue;
+                }
                 final StatsKeyObject statsKey = new StatsKeyObject(file.getAbsolutePath() + "@" + count);
                 paramMap.put(Constants.CRAWLER_STATS_KEY, statsKey);
                 final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
