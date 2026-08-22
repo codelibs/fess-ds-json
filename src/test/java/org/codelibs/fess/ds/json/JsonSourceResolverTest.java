@@ -28,6 +28,7 @@ import java.util.stream.Collectors;
 
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreException;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
 public class JsonSourceResolverTest {
@@ -47,9 +48,10 @@ public class JsonSourceResolverTest {
     public void test_filesAndDirectories_areCombined() throws IOException {
         final Path dir = Files.createTempDirectory("res");
         final Path indir = dir.resolve("indir.json");
-        final Path standalone = Files.createTempFile("standalone", ".jsonl");
+        Path standalone = null;
         try {
             Files.createFile(indir);
+            standalone = Files.createTempFile("standalone", ".jsonl");
 
             final DataStoreParams params = new DataStoreParams();
             params.put("files", standalone.toString());
@@ -60,8 +62,10 @@ public class JsonSourceResolverTest {
             assertTrue(names.contains("indir.json"), names.toString());
             assertTrue(names.contains(standalone.getFileName().toString()), names.toString());
         } finally {
+            if (standalone != null) {
+                Files.deleteIfExists(standalone);
+            }
             Files.deleteIfExists(indir);
-            Files.deleteIfExists(standalone);
             Files.deleteIfExists(dir);
         }
     }
@@ -185,6 +189,60 @@ public class JsonSourceResolverTest {
         }
     }
 
+    /**
+     * A leading {@code .*} makes {@code find()} succeed at offset 0 too, so a pattern like
+     * {@code .*keep\.json} cannot tell {@code matches()} from {@code find()} apart when the only
+     * candidates are an exact name and an unrelated one. This test uses a name that CONTAINS the
+     * pattern's target as a strict prefix but is not equal to it, so only full-string matching
+     * excludes it.
+     */
+    @Test
+    public void test_includePattern_usesFullMatchNotSubstring() throws IOException {
+        final Path dir = Files.createTempDirectory("res");
+        final Path keep = dir.resolve("keep.json");
+        final Path keepKeep = dir.resolve("keep.json.json");
+        try {
+            Files.createFile(keep);
+            Files.createFile(keepKeep);
+
+            final DataStoreParams params = new DataStoreParams();
+            params.put("directories", dir.toString());
+            params.put("include_pattern", ".*keep\\.json");
+
+            assertEquals(List.of("keep.json"), names(params));
+        } finally {
+            Files.deleteIfExists(keep);
+            Files.deleteIfExists(keepKeep);
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    /**
+     * Same discriminator as {@link #test_includePattern_usesFullMatchNotSubstring()}, on the
+     * exclude side: under {@code find()}, {@code drop.json.json} would also be excluded because it
+     * contains "drop.json" as a substring; under {@code matches()} only the exact name is.
+     */
+    @Test
+    public void test_excludePattern_usesFullMatchNotSubstring() throws IOException {
+        final Path dir = Files.createTempDirectory("res");
+        final Path drop = dir.resolve("drop.json");
+        final Path dropDrop = dir.resolve("drop.json.json");
+        try {
+            Files.createFile(drop);
+            Files.createFile(dropDrop);
+
+            final DataStoreParams params = new DataStoreParams();
+            params.put("directories", dir.toString());
+            params.put("exclude_pattern", ".*drop\\.json");
+
+            assertEquals(List.of("drop.json.json"), names(params));
+        } finally {
+            Files.deleteIfExists(drop);
+            Files.deleteIfExists(dropDrop);
+            Files.deleteIfExists(dir);
+        }
+    }
+
     @Test
     public void test_fileSuffixes_parameterOverridesDefault() throws IOException {
         final Path dir = Files.createTempDirectory("res");
@@ -275,6 +333,43 @@ public class JsonSourceResolverTest {
             assertEquals(0, names(params).size());
         } finally {
             Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * A symlink cycle ({@code a/loop -> a}) must not be walked forever, and the real file inside
+     * {@code a} must be collected exactly once, not once per level the walk manages to descend
+     * before {@code max_depth} cuts it off. Skipped when this filesystem cannot create symbolic
+     * links (some CI agents and Windows without elevated privileges refuse it).
+     */
+    @Test
+    public void test_directories_recursive_symlinkCycle_collectsFileOnce() throws IOException {
+        final Path dir = Files.createTempDirectory("res");
+        final Path a = dir.resolve("a");
+        final Path target = a.resolve("target.json");
+        final Path loop = a.resolve("loop");
+        try {
+            Files.createDirectory(a);
+            Files.createFile(target);
+            try {
+                Files.createSymbolicLink(loop, a);
+            } catch (final IOException | UnsupportedOperationException e) {
+                Assumptions.assumeTrue(false, "symlinks are not supported on this filesystem: " + e);
+            }
+
+            final DataStoreParams params = new DataStoreParams();
+            params.put("directories", dir.toString());
+            params.put("recursive", "true");
+            params.put("max_depth", "50");
+
+            final List<String> names = names(params);
+            final long targetCount = names.stream().filter("target.json"::equals).count();
+            assertEquals(1, targetCount, names.toString());
+        } finally {
+            Files.deleteIfExists(loop);
+            Files.deleteIfExists(target);
+            Files.deleteIfExists(a);
+            Files.deleteIfExists(dir);
         }
     }
 }

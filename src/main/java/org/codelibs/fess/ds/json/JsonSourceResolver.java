@@ -16,11 +16,14 @@
 package org.codelibs.fess.ds.json;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 import org.apache.logging.log4j.LogManager;
@@ -115,8 +118,16 @@ public class JsonSourceResolver {
             for (final String path : splitValues(dirs)) {
                 final File dir = new File(path);
                 if (dir.isDirectory()) {
+                    final Set<String> visited = new HashSet<>();
+                    if (recursive) {
+                        final String canonicalRoot = canonicalPathOrNull(dir);
+                        if (canonicalRoot == null) {
+                            continue;
+                        }
+                        visited.add(canonicalRoot);
+                    }
                     final List<File> found = new ArrayList<>();
-                    collect(dir, suffixes, includePattern, excludePattern, recursive, maxDepth, 0, found);
+                    collect(dir, suffixes, includePattern, excludePattern, recursive, maxDepth, 0, visited, found);
                     found.sort(Comparator.comparingLong(File::lastModified));
                     found.forEach(f -> sources.add(new FileJsonSource(f)));
                 } else {
@@ -141,10 +152,12 @@ public class JsonSourceResolver {
      * @param recursive whether to descend into subdirectories
      * @param maxDepth how far below {@code dir} recursion may go
      * @param depth the current depth
+     * @param visited canonical paths of directories already walked on this scan, used to stop
+     *            symlink cycles; empty and unused when {@code recursive} is {@code false}
      * @param out collected files
      */
     private void collect(final File dir, final String[] suffixes, final Pattern includePattern, final Pattern excludePattern,
-            final boolean recursive, final int maxDepth, final int depth, final List<File> out) {
+            final boolean recursive, final int maxDepth, final int depth, final Set<String> visited, final List<File> out) {
         final File[] entries = dir.listFiles();
         if (entries == null) {
             logger.warn("Failed to list {}.", dir.getAbsolutePath());
@@ -153,11 +166,43 @@ public class JsonSourceResolver {
         for (final File entry : entries) {
             if (entry.isDirectory()) {
                 if (recursive && depth < maxDepth) {
-                    collect(entry, suffixes, includePattern, excludePattern, recursive, maxDepth, depth + 1, out);
+                    // A symlink can point back at an ancestor directory, e.g. "a/loop -> a". Without
+                    // cycle detection that recurses forever, bounded only by max_depth, and every
+                    // level re-lists the same real directory, duplicating every file in it. We key
+                    // on the canonical (symlink-resolved) path, seeded with the scan's own root
+                    // directory, and skip anything already seen on this walk.
+                    final String canonical = canonicalPathOrNull(entry);
+                    if (canonical == null || !visited.add(canonical)) {
+                        logger.warn("Skipping {} to avoid an unbounded or duplicate walk.", entry.getAbsolutePath());
+                        continue;
+                    }
+                    collect(entry, suffixes, includePattern, excludePattern, recursive, maxDepth, depth + 1, visited, out);
                 }
             } else if (hasDesiredSuffix(entry.getName(), suffixes) && accepts(entry.getAbsolutePath(), includePattern, excludePattern)) {
                 out.add(entry);
             }
+        }
+    }
+
+    /**
+     * Resolves a file's canonical (symlink-free) path, for cycle detection.
+     *
+     * <p>
+     * {@link File#getCanonicalPath()} can fail, for example on a symlink whose target cannot be
+     * resolved. When that happens we cannot tell whether the entry is a cycle, so we choose to skip
+     * it rather than risk descending into one: a missed directory is a minor gap, an unbounded or
+     * duplicate walk is a real failure.
+     * </p>
+     *
+     * @param file the file to resolve
+     * @return the canonical path, or {@code null} if it could not be resolved
+     */
+    private String canonicalPathOrNull(final File file) {
+        try {
+            return file.getCanonicalPath();
+        } catch (final IOException e) {
+            logger.warn("Failed to resolve the canonical path of {}.", file.getAbsolutePath(), e);
+            return null;
         }
     }
 
