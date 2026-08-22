@@ -727,6 +727,96 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
+     * 2行目が「完全なオブジェクトで始まる」だけの単一オブジェクトが、JSON Lines と
+     * 誤判定されないことを検証する。{@code {"a":\n{"b":1}}} は妥当な JSON 1件だが、
+     * 2行目 {@code {"b":1}}} は完全なオブジェクトの後ろに余分な {@code }} が続くだけである。
+     * 2行目の判定を厳密にしないと行経路に載り、レコードが失われる。
+     */
+    @Test
+    public void test_storeData_valueOnNextLineIsNotJsonLines() throws Exception {
+        final Path file = Files.createTempFile("nextline", ".json");
+
+        try {
+            Files.writeString(file, "{\"url\":\n{\"href\":\"http://example.com/1\"}}\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("the whole object is one record: " + callback.getDataMapList(), 1, callback.getDataMapList().size());
+            assertEquals("no failures: " + failureUrls, 0, failureUrls.size());
+            final Object url = callback.getDataMapList().get(0).get("url");
+            assertTrue("the nested value survives, so the object was not read line by line: " + url, url instanceof Map);
+            assertEquals("http://example.com/1", ((Map<?, ?>) url).get("href"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * 上と同じ形に、入れ子の後ろへ兄弟フィールドを足したもの。2行目
+     * {@code {"x":1},} は完全なオブジェクトのあとにカンマが続くだけで、レコードではない。
+     * 誤判定されるとオブジェクト全体が3行に切り刻まれる。
+     */
+    @Test
+    public void test_storeData_valueOnNextLineWithSiblingFieldIsNotJsonLines() throws Exception {
+        final Path file = Files.createTempFile("nextlinesibling", ".json");
+
+        try {
+            Files.writeString(file, "{\"data\":\n{\"x\":1},\n\"url\":\"http://example.com/1\"}\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("the whole object is one record: " + callback.getDataMapList(), 1, callback.getDataMapList().size());
+            assertEquals("no failures: " + failureUrls, 0, failureUrls.size());
+            assertEquals("the field after the nested value is read too", "http://example.com/1",
+                    callback.getDataMapList().get(0).get("url"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * 1行に2件のオブジェクトが並ぶ行から先頭の1件だけが登録される、という本フェーズ以前からの
+     * 挙動が変わっていないことを明示的に固定する。2行目の判定を厳密にした一方で、1行目の判定は
+     * 意図的に緩いままである。将来これを黙って引き締められないようにする。
+     */
+    @Test
+    public void test_storeData_twoObjectsOnFirstLineStillYieldsOnlyTheFirst() throws Exception {
+        final Path file = Files.createTempFile("twoonaline", ".jsonl");
+
+        try {
+            Files.writeString(file,
+                    "{\"url\":\"http://example.com/1\"}{\"url\":\"http://example.com/2\"}\n" + "{\"url\":\"http://example.com/3\"}\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("the second object on line 1 is still dropped: " + callback.getDataMapList(), 2, callback.getDataMapList().size());
+            assertEquals("http://example.com/1", callback.getDataMapList().get(0).get("url"));
+            assertEquals("http://example.com/3", callback.getDataMapList().get(1).get("url"));
+            assertEquals("still silent about it: " + failureUrls, 0, failureUrls.size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
      * 配列内の1件の不正な要素が、失敗記録1件で報告されることを検証する。トークンストリームは
      * 不正な区間を1文字ずつ踏み越えながら失敗を繰り返すため、素直に記録すると同じ URL に
      * 対する同一の失敗記録が積み上がる。

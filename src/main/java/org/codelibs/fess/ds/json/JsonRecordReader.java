@@ -71,6 +71,17 @@ import com.fasterxml.jackson.databind.RuntimeJsonMappingException;
  * break at all, so its "first line" is the whole file; reaching the limit without finding one
  * is itself the answer, and the token stream takes over.
  * </p>
+ *
+ * <p>
+ * Two boundaries of {@link Format#AUTO} detection are worth knowing, both reachable only through
+ * a broken document and both loud rather than silent. First, the look-ahead reads at most the
+ * first two non-blank lines, so a JSON Lines document whose first <em>two</em> lines are both
+ * malformed is not recognised as line-delimited: it goes to the token stream, which typically
+ * fails on the opening record and reports one failure for the source, losing the good records
+ * after it. Second, a JSON Lines document whose first line is longer than {@link #PEEK_LIMIT}
+ * is likewise read as a token stream, so a broken first line that long costs the records after
+ * it too. {@code format=jsonl} skips the look-ahead entirely and reads either file correctly.
+ * </p>
  */
 public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>, Closeable {
 
@@ -298,11 +309,11 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
         }
 
         final String firstLine = peekLine(in, consumed, lineStart);
-        if (firstLine == null || parsesAsCompleteObject(firstLine)) {
+        if (firstLine == null || parsesAsCompleteObject(firstLine, false)) {
             return firstLine != null;
         }
         final String secondLine = peekNonBlankLine(in, consumed);
-        return secondLine != null && parsesAsCompleteObject(secondLine);
+        return secondLine != null && parsesAsCompleteObject(secondLine, true);
     }
 
     /**
@@ -361,20 +372,31 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
      * </p>
      *
      * <p>
+     * {@code strict} additionally rejects a line that merely <em>begins</em> with a complete
+     * object. The second-line check needs that, because it is asked about lines that follow a
+     * first line which did not parse: {@code {"a":\n{"b":1}}} is one valid object whose second
+     * line reads {@code {"b":1}}}, and without the check that stray closing brace is ignored,
+     * the line looks like a whole record and the document is torn up as JSON Lines. The
+     * first-line check deliberately stays lenient: a first line holding two objects back to back
+     * and yielding only the first is behaviour that predates this phase.
+     * </p>
+     *
+     * <p>
      * Only the structure is walked: the look-ahead asks a yes/no question, so no Map is built
      * for a line that is read here and then read again as a record.
      * </p>
      *
      * @param line the line to try
+     * @param strict whether anything after the object disqualifies the line
      * @return {@code true} if the line parses on its own as a JSON object
      */
-    private boolean parsesAsCompleteObject(final String line) {
+    private boolean parsesAsCompleteObject(final String line, final boolean strict) {
         try (JsonParser lineParser = objectMapper.getFactory().createParser(line)) {
             if (lineParser.nextToken() != JsonToken.START_OBJECT) {
                 return false;
             }
             lineParser.skipChildren();
-            return true;
+            return !strict || lineParser.nextToken() == null;
         } catch (final IOException e) {
             return false;
         }
