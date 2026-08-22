@@ -80,6 +80,12 @@ public class JsonDataStore extends AbstractDataStore {
 
     private static final String DIRS_PARAM = "directories";
 
+    /** Zero-width no-break space, i.e. the character a UTF-8 BOM decodes to. */
+    private static final char BOM_CHAR = '\uFEFF';
+
+    /** Reused across every record; never reconfigured, which is Jackson's condition for sharing a mapper. */
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
     private String[] fileSuffixes = { ".json", ".jsonl" };
 
     /**
@@ -131,7 +137,7 @@ public class JsonDataStore extends AbstractDataStore {
             for (final String path : values) {
                 final File dir = new File(path);
                 if (dir.isDirectory()) {
-                    stream(dir.listFiles()).of(stream -> stream.filter(f -> isDesiredFile(f.getParentFile(), f.getName()))
+                    stream(dir.listFiles()).of(stream -> stream.filter(f -> isDesiredFile(f.getName()))
                             .sorted(Comparator.comparingLong(File::lastModified))
                             .forEach(fileList::add));
                 } else {
@@ -147,7 +153,7 @@ public class JsonDataStore extends AbstractDataStore {
                     logger.warn("{} does not exist.", path);
                 } else if (!file.isFile()) {
                     logger.warn("{} is not a file.", path);
-                } else if (!isDesiredFile(file.getParentFile(), file.getName())) {
+                } else if (!isDesiredFile(file.getName())) {
                     logger.warn("{} is skipped because its suffix is not one of {}.", path, Arrays.toString(fileSuffixes));
                 } else {
                     fileList.add(file);
@@ -170,7 +176,13 @@ public class JsonDataStore extends AbstractDataStore {
         return stream(value.split(",")).get(stream -> stream.map(String::trim).filter(StringUtil::isNotBlank).toArray(n -> new String[n]));
     }
 
-    private boolean isDesiredFile(final File parentFile, final String filename) {
+    /**
+     * Determines whether a file name has one of the configured suffixes.
+     *
+     * @param filename the file name to check
+     * @return {@code true} if the name ends with one of {@link #fileSuffixes}
+     */
+    private boolean isDesiredFile(final String filename) {
         final String name = filename.toLowerCase(Locale.ROOT);
         for (final String suffix : fileSuffixes) {
             if (name.endsWith(suffix)) {
@@ -199,7 +211,6 @@ public class JsonDataStore extends AbstractDataStore {
     private boolean processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap, final File file, final String fileEncoding) {
         final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
-        final ObjectMapper objectMapper = new ObjectMapper();
 
         final String scriptType = getScriptType(paramMap);
         logger.info("Loading {}", file.getAbsolutePath());
@@ -316,9 +327,6 @@ public class JsonDataStore extends AbstractDataStore {
     }
 
     /** Zero-width no-break space, i.e. the character a UTF-8 BOM decodes to. */
-    /** Zero-width no-break space, i.e. the character a UTF-8 BOM decodes to. */
-    private static final char BOM_CHAR = '\uFEFF';
-
     /**
      * Removes a leading byte order mark from the first line of a file.
      *

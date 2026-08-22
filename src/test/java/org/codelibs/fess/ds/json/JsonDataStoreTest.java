@@ -110,23 +110,21 @@ public class JsonDataStoreTest extends UnitDsTestCase {
      */
     @Test
     public void test_isDesiredFile_defaultSuffixes() throws Exception {
-        File parentDir = new File("/tmp");
-
         // Test .json files
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.json"));
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", parentDir, "TEST.JSON"));
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", parentDir, "data.Json"));
+        assertTrue(invokeMethod(dataStore, "isDesiredFile", "test.json"));
+        assertTrue(invokeMethod(dataStore, "isDesiredFile", "TEST.JSON"));
+        assertTrue(invokeMethod(dataStore, "isDesiredFile", "data.Json"));
 
         // Test .jsonl files
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.jsonl"));
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", parentDir, "TEST.JSONL"));
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", parentDir, "data.Jsonl"));
+        assertTrue(invokeMethod(dataStore, "isDesiredFile", "test.jsonl"));
+        assertTrue(invokeMethod(dataStore, "isDesiredFile", "TEST.JSONL"));
+        assertTrue(invokeMethod(dataStore, "isDesiredFile", "data.Jsonl"));
 
         // Test non-JSON files
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.txt"));
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.xml"));
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.csv"));
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", parentDir, "testjson"));
+        assertFalse(invokeMethod(dataStore, "isDesiredFile", "test.txt"));
+        assertFalse(invokeMethod(dataStore, "isDesiredFile", "test.xml"));
+        assertFalse(invokeMethod(dataStore, "isDesiredFile", "test.csv"));
+        assertFalse(invokeMethod(dataStore, "isDesiredFile", "testjson"));
     }
 
     /**
@@ -135,12 +133,11 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     @Test
     public void test_setFileSuffixes_customSuffixes() throws Exception {
         dataStore.setFileSuffixes(new String[] { ".data", ".txt" });
-        File parentDir = new File("/tmp");
 
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.data"));
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.txt"));
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.json"));
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.jsonl"));
+        assertTrue(invokeMethod(dataStore, "isDesiredFile", "test.data"));
+        assertTrue(invokeMethod(dataStore, "isDesiredFile", "test.txt"));
+        assertFalse(invokeMethod(dataStore, "isDesiredFile", "test.json"));
+        assertFalse(invokeMethod(dataStore, "isDesiredFile", "test.jsonl"));
     }
 
     /**
