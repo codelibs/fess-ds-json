@@ -101,7 +101,7 @@ public class JsonRecordReaderTest {
 
     @Test
     public void test_utf8Bom_isStripped() throws IOException {
-        final List<Map<String, Object>> list = readAll("﻿{\"a\":1}\n{\"a\":2}\n");
+        final List<Map<String, Object>> list = readAll("\uFEFF{\"a\":1}\n{\"a\":2}\n");
         assertEquals(2, list.size());
     }
 
@@ -203,5 +203,77 @@ public class JsonRecordReaderTest {
         }
         // The first object starts on line 2, the second on line 5.
         assertEquals(List.of(2, 5), lineNumbers);
+    }
+
+    @Test
+    public void test_constructorFailure_closesStream_formatJsonlOnArray() {
+        final TrackingInputStream in = new TrackingInputStream("[{\"a\":1}]".getBytes(StandardCharsets.UTF_8));
+        assertThrows(DataStoreException.class, () -> new JsonRecordReader(in, "UTF-8", Format.JSONL, null));
+        assertTrue(in.isClosed(), "stream must be closed when format=jsonl is rejected on an array");
+    }
+
+    @Test
+    public void test_constructorFailure_closesStream_malformedJson() {
+        // Invalid from the very first character, so parser.nextToken() throws inside the
+        // constructor itself rather than later during iteration.
+        final TrackingInputStream in = new TrackingInputStream("]not json at all".getBytes(StandardCharsets.UTF_8));
+        assertThrows(IOException.class, () -> new JsonRecordReader(in, "UTF-8", Format.AUTO, null));
+        assertTrue(in.isClosed(), "stream must be closed when the parser fails on the first token");
+    }
+
+    @Test
+    public void test_constructorFailure_closesStream_unsupportedEncoding() {
+        final TrackingInputStream in = new TrackingInputStream("{\"a\":1}".getBytes(StandardCharsets.UTF_8));
+        assertThrows(IOException.class, () -> new JsonRecordReader(in, "totally-bogus-encoding", Format.AUTO, null));
+        assertTrue(in.isClosed(), "stream must be closed when the requested encoding is unsupported");
+    }
+
+    @Test
+    public void test_constructorFailure_closesStream_readThrows() {
+        final TrackingInputStream in = new TrackingInputStream(new byte[0], true);
+        assertThrows(IOException.class, () -> new JsonRecordReader(in, "UTF-8", Format.AUTO, null));
+        assertTrue(in.isClosed(), "stream must be closed when the underlying stream fails on its first read");
+    }
+
+    /**
+     * An {@link InputStream} that records whether {@link #close()} was called, and can
+     * optionally fail on its first {@link #read()} to simulate a broken underlying source.
+     */
+    private static final class TrackingInputStream extends InputStream {
+
+        private final byte[] data;
+
+        private final boolean failOnRead;
+
+        private int pos;
+
+        private boolean closed;
+
+        TrackingInputStream(final byte[] data) {
+            this(data, false);
+        }
+
+        TrackingInputStream(final byte[] data, final boolean failOnRead) {
+            this.data = data;
+            this.failOnRead = failOnRead;
+        }
+
+        @Override
+        public int read() throws IOException {
+            if (failOnRead) {
+                throw new IOException("simulated read failure");
+            }
+            return pos < data.length ? data[pos++] & 0xff : -1;
+        }
+
+        @Override
+        public void close() throws IOException {
+            closed = true;
+            super.close();
+        }
+
+        boolean isClosed() {
+            return closed;
+        }
     }
 }

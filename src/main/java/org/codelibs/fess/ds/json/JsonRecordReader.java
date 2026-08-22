@@ -54,7 +54,7 @@ import com.fasterxml.jackson.databind.RuntimeJsonMappingException;
 public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>, Closeable {
 
     /** Zero-width no-break space, i.e. the character a UTF-8 BOM decodes to. */
-    private static final char BOM_CHAR = '﻿';
+    private static final char BOM_CHAR = '\uFEFF';
 
     /** Reused across every record; never reconfigured, which is Jackson's condition for sharing a mapper. */
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -65,7 +65,11 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
         AUTO,
         /** A sequence of JSON objects. */
         JSONL,
-        /** A JSON array of objects, or a single JSON object. */
+        /**
+         * A JSON array of objects, or a single JSON object. Not enforced: a JSONL-shaped
+         * stream is still read in full rather than rejected or capped at one record, since
+         * the first token alone cannot tell "one object" apart from "many".
+         */
         JSON
     }
 
@@ -105,11 +109,12 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
      */
     @SuppressWarnings("unchecked")
     public JsonRecordReader(final InputStream in, final String encoding, final Format format, final String rootPath) throws IOException {
-        final Reader openedReader = stripBom(new InputStreamReader(in, encoding));
+        Reader openedReader = null;
         JsonParser openedParser = null;
         final MappingIterator<Map<String, Object>> openedIterator;
         boolean openedSingleRecordOnly = false;
         try {
+            openedReader = stripBom(new InputStreamReader(in, encoding));
             openedParser = objectMapper.getFactory().createParser(openedReader);
 
             JsonToken token = openedParser.nextToken();
@@ -149,9 +154,11 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
                 }
             }
         } catch (final RuntimeException | IOException e) {
-            // The reader/parser were opened above but this instance never finishes constructing,
-            // so the caller's try-with-resources has nothing to close them with. Close them here.
-            closeQuietly(openedParser, openedReader);
+            // Whatever of the reader/parser/stream chain was opened above, this instance never
+            // finishes constructing, so the caller's try-with-resources has nothing to close them
+            // with - not even the InputStream passed in, since it is wrapped, not owned, until the
+            // constructor returns successfully. Close them here instead.
+            closeQuietly(openedParser, openedReader, in);
             throw e;
         }
         reader = openedReader;
@@ -204,13 +211,22 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
     }
 
     /**
-     * Closes a parser and/or reader that were opened while this instance was still under
-     * construction, ignoring any error encountered while closing them.
+     * Closes a parser, reader and/or the raw stream that were opened while this instance was
+     * still under construction, ignoring any error encountered while closing them.
+     *
+     * <p>
+     * Closing {@code p} or {@code r} normally closes {@code in} too, since each wraps the one
+     * before it, but a failure can strike before any of them exist - an unsupported encoding
+     * name fails before {@code r} is built, for instance - so {@code in} is always closed
+     * directly as well. {@link Closeable#close()} is specified to have no effect on an
+     * already-closed stream, so closing it more than once here is not a problem.
+     * </p>
      *
      * @param p the parser to close, may be {@code null} if not yet created
-     * @param r the reader to close, may be {@code null}
+     * @param r the reader to close, may be {@code null} if not yet created
+     * @param in the raw stream passed to the constructor
      */
-    private static void closeQuietly(final JsonParser p, final Reader r) {
+    private static void closeQuietly(final JsonParser p, final Reader r, final InputStream in) {
         try {
             if (p != null) {
                 p.close();
@@ -224,6 +240,12 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
                 }
             } catch (final IOException ignore) {
                 // best-effort cleanup; the exception that triggered this close is what matters
+            } finally {
+                try {
+                    in.close();
+                } catch (final IOException ignore) {
+                    // best-effort cleanup; the exception that triggered this close is what matters
+                }
             }
         }
     }
