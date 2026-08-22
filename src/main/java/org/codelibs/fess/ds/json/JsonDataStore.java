@@ -24,6 +24,7 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -142,10 +143,14 @@ public class JsonDataStore extends AbstractDataStore {
             final String[] values = splitPaths(value);
             for (final String path : values) {
                 final File file = new File(path);
-                if (file.isFile() && isDesiredFile(file.getParentFile(), file.getName())) {
-                    fileList.add(file);
+                if (!file.exists()) {
+                    logger.warn("{} does not exist.", path);
+                } else if (!file.isFile()) {
+                    logger.warn("{} is not a file.", path);
+                } else if (!isDesiredFile(file.getParentFile(), file.getName())) {
+                    logger.warn("{} is skipped because its suffix is not one of {}.", path, Arrays.toString(fileSuffixes));
                 } else {
-                    logger.warn("{} is not found.", path);
+                    fileList.add(file);
                 }
             }
         }
@@ -289,10 +294,25 @@ public class JsonDataStore extends AbstractDataStore {
             }
         } catch (final FileNotFoundException e) {
             logger.warn("Source file {} does not exist.", file, e);
+            recordFileFailure(dataConfig, file, e);
         } catch (final IOException e) {
-            logger.warn("IO Error occurred while reading source file.", e);
+            logger.warn("IO Error occurred while reading source file {}.", file, e);
+            recordFileFailure(dataConfig, file, e);
         }
         return !aborted;
+    }
+
+    /**
+     * Records a file-level failure so that a crawl which could not read one of its inputs
+     * is not reported as fully successful.
+     *
+     * @param dataConfig the data configuration being crawled
+     * @param file the file that could not be read
+     * @param e the cause
+     */
+    private void recordFileFailure(final DataConfig dataConfig, final File file, final Throwable e) {
+        final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
+        failureUrlService.store(dataConfig, e.getClass().getCanonicalName(), file.getAbsolutePath(), e);
     }
 
     /** Zero-width no-break space, i.e. the character a UTF-8 BOM decodes to. */

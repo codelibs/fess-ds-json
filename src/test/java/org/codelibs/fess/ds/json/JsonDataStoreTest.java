@@ -731,6 +731,38 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
+     * 読み取れないファイルが失敗として記録されることを検証する。
+     */
+    @Test
+    public void test_storeData_recordsUnreadableFile() throws Exception {
+        final Path dir = Files.createTempDirectory("unreadable");
+        final Path good = dir.resolve("good.jsonl");
+        final Path bad = dir.resolve("bad.jsonl");
+        Files.writeString(good, "{\"url\":\"http://example.com/1\"}\n");
+        Files.writeString(bad, "{\"url\":\"http://example.com/2\"}\n");
+        assertTrue("the file must become unreadable", bad.toFile().setReadable(false, false));
+
+        final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+        final DataStoreParams params = new DataStoreParams();
+        params.put("files", good + "," + bad);
+        final Map<String, String> scriptMap = new HashMap<>();
+        scriptMap.put("url", "url");
+
+        try {
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("the readable file is still processed", 1, callback.getDataMapList().size());
+            assertEquals("the unreadable file is recorded as a failure", 1, failureUrls.size());
+            assertTrue("failure refers to the unreadable file: " + failureUrls, failureUrls.get(0).contains(bad.toString()));
+        } finally {
+            bad.toFile().setReadable(true, false);
+            Files.deleteIfExists(good);
+            Files.deleteIfExists(bad);
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    /**
      * Helper method to invoke private methods using reflection.
      */
 
