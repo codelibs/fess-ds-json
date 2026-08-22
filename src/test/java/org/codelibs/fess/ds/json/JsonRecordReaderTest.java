@@ -16,6 +16,7 @@
 package org.codelibs.fess.ds.json;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -33,6 +34,10 @@ import org.junit.jupiter.api.Test;
 
 public class JsonRecordReaderTest {
 
+    private JsonRecordReader openReader(final String json, final Format format, final String rootPath) throws IOException {
+        return new JsonRecordReader(new ByteArrayInputStream(json.getBytes(StandardCharsets.UTF_8)), "UTF-8", format, rootPath);
+    }
+
     private List<Map<String, Object>> readAll(final String json, final Format format, final String rootPath) throws IOException {
         final InputStream in = new ByteArrayInputStream(json.getBytes(StandardCharsets.UTF_8));
         final List<Map<String, Object>> list = new ArrayList<>();
@@ -46,6 +51,24 @@ public class JsonRecordReaderTest {
 
     private List<Map<String, Object>> readAll(final String json) throws IOException {
         return readAll(json, Format.AUTO, null);
+    }
+
+    /**
+     * Reads every record, substituting the failure itself for a record that could not be parsed,
+     * so a test can assert on the records and the failures between them in one list.
+     */
+    private List<Object> readOutcomes(final String json, final Format format, final String rootPath) throws IOException {
+        final List<Object> outcomes = new ArrayList<>();
+        try (JsonRecordReader reader = openReader(json, format, rootPath)) {
+            while (reader.hasNext()) {
+                try {
+                    outcomes.add(reader.next());
+                } catch (final DataStoreException e) {
+                    outcomes.add(e);
+                }
+            }
+        }
+        return outcomes;
     }
 
     @Test
@@ -109,6 +132,33 @@ public class JsonRecordReaderTest {
     public void test_format_jsonl_isNotAutoDetected() throws IOException {
         // Forcing JSONL on an array must fail rather than silently succeed.
         assertThrows(DataStoreException.class, () -> readAll("[{\"a\":1}]", Format.JSONL, null));
+    }
+
+    /**
+     * AUTO must pick the read strategy from the document's grammar: line by line for JSON
+     * Lines, token stream for a single object spanning lines. Getting this wrong either
+     * shreds a pretty-printed object into unparseable lines, or drags JSON Lines back onto a
+     * token stream, where one bad line can swallow the record after it.
+     */
+    @Test
+    public void test_auto_picksLinePathForJsonl_andTokenPathForPrettyPrintedObject() throws IOException {
+        final String jsonl = "{\"a\":1}\nnot json\n{\"a\":3}\n";
+        try (JsonRecordReader reader = openReader(jsonl, Format.AUTO, null)) {
+            assertTrue(reader.isLineOriented(), "a document whose first non-blank line is a complete object is JSON Lines");
+        }
+        final List<Object> outcomes = readOutcomes(jsonl, Format.AUTO, null);
+        assertEquals(3, outcomes.size(), "one outcome per non-blank line: " + outcomes);
+        assertEquals(1, ((Map<?, ?>) outcomes.get(0)).get("a"));
+        assertTrue(outcomes.get(1) instanceof DataStoreException, "the malformed line fails on its own: " + outcomes.get(1));
+        assertEquals(3, ((Map<?, ?>) outcomes.get(2)).get("a"), "a malformed line must not cost the lines after it");
+
+        final String prettyObject = "{\n  \"a\": 1,\n  \"b\": {\n    \"c\": 2\n  }\n}\n";
+        try (JsonRecordReader reader = openReader(prettyObject, Format.AUTO, null)) {
+            assertFalse(reader.isLineOriented(), "a single object spanning several lines is not line-delimited");
+        }
+        final List<Map<String, Object>> records = readAll(prettyObject);
+        assertEquals(1, records.size(), "the token stream reads the whole object: " + records);
+        assertTrue(records.get(0).get("b") instanceof Map, "the nested object survives, so the document was not read line by line");
     }
 
     @Test
@@ -239,6 +289,18 @@ public class JsonRecordReaderTest {
      * An {@link InputStream} that records whether {@link #close()} was called, and can
      * optionally fail on its first {@link #read()} to simulate a broken underlying source.
      */
+    /**
+     * A line holding only {@code null} is not a record. Jackson deserialises a bare JSON null
+     * into a null Map instead of failing, so it was the one non-object line that reached the
+     * caller; a line holding {@code true} or a number already failed here.
+     */
+    @Test
+    public void test_jsonl_nullLineIsRejectedLikeAnyOtherNonObject() {
+        final DataStoreException e = assertThrows(DataStoreException.class, () -> readAll("{\"a\":1}\nnull\n{\"b\":2}\n"),
+                "a bare null must fail the line rather than yield a null record");
+        assertTrue(e.getMessage().contains("line 2"), "the failing line is named: " + e.getMessage());
+    }
+
     private static final class TrackingInputStream extends InputStream {
 
         private final byte[] data;

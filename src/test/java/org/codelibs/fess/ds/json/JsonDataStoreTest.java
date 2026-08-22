@@ -32,6 +32,7 @@ import org.codelibs.fess.app.service.FailureUrlService;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreCrawlingException;
+import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.helper.CrawlerStatsHelper;
 import org.codelibs.fess.helper.SystemHelper;
 import org.codelibs.fess.opensearch.config.exentity.CrawlingConfig;
@@ -581,6 +582,36 @@ public class JsonDataStoreTest extends UnitDsTestCase {
             dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
 
             assertEquals("both nested elements are stored", 2, callback.getDataMapList().size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * A line holding only null is not a record. It was already recorded as a failure, but as a
+     * NullPointerException raised while merging the record into the script scope, which names
+     * neither the line nor what was wrong with it.
+     */
+    @Test
+    public void test_storeData_nullLineIsRecordedAsFailure() throws Exception {
+        final Path file = Files.createTempFile("nullline", ".jsonl");
+
+        try {
+            Files.writeString(file, "{\"url\":\"http://example.com/1\"}\n" + "null\n" + "{\"url\":\"http://example.com/2\"}\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("the lines either side of the null are still stored: " + failureUrls, 2, callback.getDataMapList().size());
+            assertEquals("exactly one failure is recorded: " + failureUrls, 1, failureUrls.size());
+            assertTrue("the failure is filed against line 2: " + failureUrls, failureUrls.get(0).endsWith("@2"));
+            assertTrue("the line is reported as a data store error, not a NullPointerException: " + failureUrls,
+                    failureUrls.get(0).startsWith(DataStoreException.class.getName()));
         } finally {
             Files.deleteIfExists(file);
         }
