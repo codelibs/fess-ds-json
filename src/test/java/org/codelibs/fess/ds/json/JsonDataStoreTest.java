@@ -33,6 +33,7 @@ import org.codelibs.fess.Constants;
 import org.codelibs.fess.app.service.FailureUrlService;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.entity.DataStoreParams;
+import org.codelibs.fess.exception.DataStoreCrawlingException;
 import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.helper.CrawlerStatsHelper;
 import org.codelibs.fess.helper.SystemHelper;
@@ -756,6 +757,102 @@ public class JsonDataStoreTest extends UnitDsTestCase {
             Files.deleteIfExists(good);
             Files.deleteIfExists(bad);
             Files.deleteIfExists(dir);
+        }
+    }
+
+    /**
+     * DataStoreCrawlingException(url, message, cause, true) が store() から投げられたとき、
+     * processFile のレコードループとファイルループの両方が break することを検証する。
+     * 1ファイル目に2件、2ファイル目に1件のレコードを置き、1件目の store() で abort する
+     * コールバックを使う。2ファイル目は決して開かれないため、試みられるレコードは1件だけ。
+     * failureUrls の errorName が例外そのものではなく cause (IllegalStateException) から、
+     * url が StatsKeyObject の id ではなく DataStoreCrawlingException#getUrl() から取られる
+     * ことも同時に固定する。
+     */
+    @Test
+    public void test_storeData_abortsOnDataStoreCrawlingException() throws Exception {
+        final Path dir = Files.createTempDirectory("abort");
+        final Path file1 = dir.resolve("a.jsonl");
+        final Path file2 = dir.resolve("b.jsonl");
+
+        try {
+            Files.writeString(file1, "{\"url\":\"http://example.com/1\"}\n{\"url\":\"http://example.com/2\"}\n");
+            // Ensure file1 sorts before file2 by last modified time.
+            Thread.sleep(100);
+            Files.writeString(file2, "{\"url\":\"http://example.com/3\"}\n");
+
+            final List<Map<String, Object>> attempted = new ArrayList<>();
+            final IndexUpdateCallback callback = new IndexUpdateCallback() {
+                @Override
+                public void store(final DataStoreParams paramMap, final Map<String, Object> dataMap) {
+                    attempted.add(new HashMap<>(dataMap));
+                    throw new DataStoreCrawlingException("http://example.com/1", "boom", new IllegalStateException("boom"), true);
+                }
+
+                @Override
+                public long getDocumentSize() {
+                    return attempted.size();
+                }
+
+                @Override
+                public long getExecuteTime() {
+                    return 0;
+                }
+
+                @Override
+                public void commit() {
+                    // nothing to do
+                }
+            };
+
+            final DataStoreParams params = new DataStoreParams();
+            params.put("directories", dir.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("only the first record is attempted: the record loop breaks on abort and the file loop "
+                    + "breaks too, so file2's record is never reached: " + attempted, 1, attempted.size());
+            assertEquals("exactly one failure is recorded: " + failureUrls, 1, failureUrls.size());
+            assertEquals(
+                    "errorName must come from the exception's cause (IllegalStateException), not the "
+                            + "exception itself, and url must come from DataStoreCrawlingException#getUrl(), " + "not the stats key id",
+                    "java.lang.IllegalStateException @ http://example.com/1", failureUrls.get(0));
+        } finally {
+            Files.deleteIfExists(file1);
+            Files.deleteIfExists(file2);
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    /**
+     * 空行を挟んでも行カウンタが実ファイルの行番号を追い続けることを検証する。1行目は
+     * 正常なレコード、2行目は空行、3行目は不正な JSON。記録される失敗の id が "@2" では
+     * なく "@3" で終わることを確認する。count++ が空行スキップ判定より前で行われている
+     * 必要があり、そうでなければ失敗はエディタ上の実際の行を指さなくなる。
+     */
+    @Test
+    public void test_storeData_lineNumberTracksRealLinesAcrossBlank() throws Exception {
+        final Path file = Files.createTempFile("linenum", ".jsonl");
+
+        try {
+            Files.writeString(file, "{\"url\":\"http://example.com/1\"}\n" + "\n" + "{not valid json\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("only the valid first line is stored", 1, callback.getDataMapList().size());
+            assertEquals("exactly one failure is recorded for the malformed third line: " + failureUrls, 1, failureUrls.size());
+            assertTrue("failure id must point at real line 3, not line 2 - the blank line must not consume " + "a line-number slot: "
+                    + failureUrls, failureUrls.get(0).endsWith("@3"));
+        } finally {
+            Files.deleteIfExists(file);
         }
     }
 
