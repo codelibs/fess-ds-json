@@ -70,6 +70,21 @@ public class JsonDataStore extends AbstractDataStore {
     /** JSON Pointer selecting a nested array. */
     protected static final String ROOT_PATH_PARAM = "root_path";
 
+    /**
+     * How many consecutive record failures the token-stream path tolerates before this data
+     * store gives up on a source.
+     *
+     * <p>
+     * A line-oriented read cannot spin: every attempt consumes one line, so the read always
+     * reaches end of file. A token stream can - a document truncated mid-object never
+     * resynchronizes, and Jackson keeps reporting a fresh failure for every character it steps
+     * over without ever reaching the end of the stream. This bound turns that into one warning
+     * instead of an endless crawl, while still leaving room for the token stream to recover from
+     * a run of garbage in the middle of an otherwise readable document.
+     * </p>
+     */
+    protected static final int MAX_CONSECUTIVE_TOKEN_FAILURES = 100;
+
     private String[] fileSuffixes = { ".json", ".jsonl" };
 
     /**
@@ -89,6 +104,20 @@ public class JsonDataStore extends AbstractDataStore {
     protected void storeData(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap) {
         final String fileEncoding = getFileEncoding(paramMap);
+        final JsonRecordReader.Format format;
+        try {
+            // Resolved here, once for the whole crawl rather than once per source, and inside
+            // guarded code: parseFormat rejects an unknown value with a DataStoreException, and
+            // from processSource that would escape storeData with no failure record and abandon
+            // every remaining source instead of reporting a plain configuration error.
+            format = JsonRecordReader.parseFormat(paramMap.getAsString(FORMAT_PARAM));
+        } catch (final DataStoreException e) {
+            logger.warn("Invalid {} parameter.", FORMAT_PARAM, e);
+            ComponentUtil.getComponent(FailureUrlService.class)
+                    .store(dataConfig, e.getClass().getCanonicalName(), getName() + ":" + FORMAT_PARAM, e);
+            return;
+        }
+        final String rootPath = paramMap.getAsString(ROOT_PATH_PARAM);
         final List<JsonSource> sourceList = createSourceResolver().resolve(paramMap);
 
         if (sourceList.isEmpty()) {
@@ -101,7 +130,7 @@ public class JsonDataStore extends AbstractDataStore {
                 logger.info("Stopped crawling: {}", source.getName());
                 break;
             }
-            if (!processSource(dataConfig, callback, paramMap, scriptMap, defaultDataMap, source, fileEncoding)) {
+            if (!processSource(dataConfig, callback, paramMap, scriptMap, defaultDataMap, source, fileEncoding, format, rootPath)) {
                 // The data store was asked to abort on this record; stop reading further sources.
                 break;
             }
@@ -131,15 +160,15 @@ public class JsonDataStore extends AbstractDataStore {
      * @param defaultDataMap the base document
      * @param source the source to read
      * @param fileEncoding the character encoding
+     * @param format the document shape, already resolved from the parameters
+     * @param rootPath a JSON Pointer selecting a nested array, may be {@code null}
      * @return {@code false} if crawling must stop, {@code true} to continue with the next source
      */
     protected boolean processSource(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap, final JsonSource source,
-            final String fileEncoding) {
+            final String fileEncoding, final JsonRecordReader.Format format, final String rootPath) {
         final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
         final String scriptType = getScriptType(paramMap);
-        final JsonRecordReader.Format format = JsonRecordReader.parseFormat(paramMap.getAsString(FORMAT_PARAM));
-        final String rootPath = paramMap.getAsString(ROOT_PATH_PARAM);
         final long readInterval = getReadInterval(paramMap);
         boolean aborted = false;
 
@@ -148,6 +177,7 @@ public class JsonDataStore extends AbstractDataStore {
                 InputStream in = openSource.openStream();
                 JsonRecordReader reader = new JsonRecordReader(in, fileEncoding, format, rootPath)) {
             int count = 0;
+            int consecutiveFailures = 0;
             while (alive && reader.hasNext()) {
                 count++;
                 // reader.next() is attempted here, before the stats key exists, because
@@ -156,7 +186,9 @@ public class JsonDataStore extends AbstractDataStore {
                 // so reading the line number any earlier would still report the PREVIOUS
                 // record's line. next() sets that line even when it throws (the malformed-JSON
                 // case), so capturing the failure here and re-throwing it below still reports
-                // the real line the broken record starts on rather than the record ordinal.
+                // the real line the broken record starts on rather than the record ordinal. The
+                // one exception is a token stream that never finds another record at all: it
+                // reaches no new line, so the failure is reported against the last one it read.
                 Map<String, Object> record = null;
                 Throwable readFailure = null;
                 try {
@@ -195,29 +227,44 @@ public class JsonDataStore extends AbstractDataStore {
                     crawlerStatsHelper.record(statsKey, StatsAction.FINISHED);
                 } catch (final CrawlingAccessException e) {
                     aborted = handleCrawlingAccessException(dataConfig, crawlerStatsHelper, statsKey, dataMap, e);
-                    if (aborted) {
-                        crawlerStatsHelper.done(statsKey);
-                        break;
-                    }
                 } catch (final Throwable t) {
                     logger.warn("Crawling Access Exception at : {}", dataMap, t);
                     final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
                     failureUrlService.store(dataConfig, t.getClass().getCanonicalName(), statsKey.getId(), t);
                     crawlerStatsHelper.record(statsKey, StatsAction.EXCEPTION);
                 } finally {
+                    // Call done() exactly once per record regardless of the outcome above, then break
+                    // out of the loop afterwards if the exception handler asked us to abort - avoids
+                    // the harmless-but-confusing double done() call that calling it again before break
+                    // would cause (CrawlerStatsHelper#done treats a second call as a silent no-op).
                     crawlerStatsHelper.done(statsKey);
+                }
+                if (aborted) {
+                    break;
+                }
+                if (readFailure == null) {
+                    consecutiveFailures = 0;
+                } else {
+                    consecutiveFailures++;
+                    // A line-oriented read always moves on to the next line, so a bad record only
+                    // ever costs that record. A token stream may instead be stuck on a remainder it
+                    // can never resynchronize with - a document truncated mid-object keeps failing
+                    // without ever reaching end of stream - so give up on this source once it has
+                    // produced nothing but failures for long enough.
+                    if (!reader.isLineOriented() && consecutiveFailures >= MAX_CONSECUTIVE_TOKEN_FAILURES) {
+                        // The line number below is approximate: these failures come from the reader
+                        // looking for the next record and never finding one, so
+                        // getCurrentLineNumber() still reports where the last record it read
+                        // successfully began.
+                        logger.warn(
+                                "Gave up on {} after {} consecutive parse failures near line {}: the document does not "
+                                        + "resynchronize. The rest of it was not read.",
+                                source.getName(), consecutiveFailures, reader.getCurrentLineNumber());
+                        break;
+                    }
                 }
                 if (readInterval > 0) {
                     sleep(readInterval);
-                }
-                if (readFailure != null) {
-                    // Unlike a line-based format, a JSON stream cannot resynchronize after a
-                    // malformed record: the underlying parser is left mid-token, and every
-                    // further hasNext()/next() call only advances one invalid character at a
-                    // time, throwing again rather than finding the next well-formed record (or
-                    // even reliably detecting end of stream). The failure above already reports
-                    // this record; stop reading the rest of this source instead of repeating it.
-                    break;
                 }
             }
         } catch (final IOException e) {

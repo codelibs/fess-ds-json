@@ -23,10 +23,16 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.app.service.FailureUrlService;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
@@ -540,6 +546,140 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
+     * 先頭が '{' ではない不正な行（紛れ込んだログ行など）があっても、その行だけが失敗として
+     * 記録され、後続の行が登録されることを検証する。JSONL は行区切りなので、1行の失敗が
+     * 1行分のコストで済まなければならない。
+     *
+     * <p>
+     * トークンストリームで読むと {@code MappingIterator#hasNext()} が {@code JsonParseException} を
+     * 素の {@code RuntimeException} で包んで投げ、それが storeData の外まで抜けてデータ設定
+     * 全体を落とす。storeData が例外を投げないことも同時に固定する。
+     * </p>
+     */
+    @Test
+    public void test_storeData_recoversFromBareWordMalformedLine() throws Exception {
+        final Path file = Files.createTempFile("bareword", ".jsonl");
+
+        try {
+            Files.writeString(file, "{\"url\":\"http://example.com/1\"}\n" + "not json\n" + "{\"url\":\"http://example.com/3\"}\n"
+                    + "{\"url\":\"http://example.com/4\"}\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            // Must not throw: a malformed line is a record-level failure, not a crawl-level one.
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("every valid line is stored: " + callback.getDataMapList(), 3, callback.getDataMapList().size());
+            assertEquals("only the malformed line is recorded as a failure: " + failureUrls, 1, failureUrls.size());
+            assertTrue("the failure points at line 2: " + failureUrls, failureUrls.get(0).endsWith("@2"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * '{' で始まる不正な行があっても、その行だけが失敗として記録され、後続の行が登録される
+     * ことを検証する。トークンストリームで読むとこの行の失敗はソース全体の打ち切りになり、
+     * 3行目が失敗記録もログもないまま消える。
+     */
+    @Test
+    public void test_storeData_recoversFromBracePrefixedMalformedLine() throws Exception {
+        final Path file = Files.createTempFile("braceprefixed", ".jsonl");
+
+        try {
+            Files.writeString(file, "{\"url\":\"http://example.com/1\"}\n" + "{not valid json\n" + "{\"url\":\"http://example.com/3\"}\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("the line after the malformed one is still read: " + callback.getDataMapList(), 2,
+                    callback.getDataMapList().size());
+            assertEquals("only the malformed line is recorded as a failure: " + failureUrls, 1, failureUrls.size());
+            assertTrue("the failure points at line 2: " + failureUrls, failureUrls.get(0).endsWith("@2"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * format に未知の値を書いた設定ミスが、storeData から抜ける例外ではなく失敗記録になる
+     * ことを検証する。抜けるとデータ設定全体が中断され、失敗記録も残らない。
+     */
+    @Test
+    public void test_storeData_invalidFormatIsReportedNotThrown() throws Exception {
+        final Path file = Files.createTempFile("badformat", ".jsonl");
+
+        try {
+            Files.writeString(file, "{\"url\":\"http://example.com/1\"}\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            params.put("format", "jsonlines");
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            // Must not throw: an unknown format is a configuration error to report, not a crash.
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("nothing is indexed with an unusable configuration", 0, callback.getDataMapList().size());
+            assertEquals("the configuration error is recorded exactly once: " + failureUrls, 1, failureUrls.size());
+            assertTrue("the failure names the offending parameter: " + failureUrls, failureUrls.get(0).contains("format"));
+            assertTrue("the failure is reported as a DataStoreException: " + failureUrls,
+                    failureUrls.get(0).startsWith("org.codelibs.fess.exception.DataStoreException @"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * 途中で切れて二度と同期し直せないドキュメントを、トークンストリーム経路が
+     * 無限に読み続けずに打ち切り、その旨を警告に残すことを検証する。
+     *
+     * <p>
+     * format=json でトークンストリームを強制する。1件目のあと 2行目が閉じられないまま
+     * ファイルが終わるので、Jackson は次のレコードを探しては失敗し続け、ストリーム終端にも
+     * 到達しない。最初の失敗で打ち切る実装だと後続が黙って消え、上限を持たない実装だと
+     * クロールが終わらない。
+     * </p>
+     */
+    @Test
+    public void test_storeData_truncatedTokenStreamStopsInsteadOfSpinning() throws Exception {
+        final Path file = Files.createTempFile("truncated", ".json");
+
+        try {
+            Files.writeString(file, "{\"url\":\"http://example.com/1\"}\n" + "{\"url\":\n" + "{\"url\":\"http://example.com/3\"}\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            params.put("format", "json");
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            final List<String> logMessages =
+                    captureDataStoreLogs(() -> dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>()));
+
+            assertEquals("the record before the truncation is stored", 1, callback.getDataMapList().size());
+            assertTrue("the token stream must keep trying past the first failure and then give up, not stop at one "
+                    + "and not run forever: " + failureUrls.size(), failureUrls.size() > 1 && failureUrls.size() <= 100);
+            assertTrue("giving up must be said out loud, naming the source: " + logMessages,
+                    logMessages.stream().anyMatch(m -> m.startsWith("Gave up on ") && m.contains(file.toString())));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
      * JSON 配列ファイルが全レコード登録されることを検証する。
      */
     @Test
@@ -585,6 +725,43 @@ public class JsonDataStoreTest extends UnitDsTestCase {
         } finally {
             Files.deleteIfExists(file);
         }
+    }
+
+    /**
+     * Runs {@code action} with an appender attached to {@link JsonDataStore}'s logger and
+     * returns the messages it logged.
+     *
+     * <p>
+     * The logger's level is forced to WARN for the duration: without a log4j2 configuration on
+     * the test classpath the default root level is ERROR, which would drop the very warning
+     * under test.
+     * </p>
+     *
+     * @param action the work to run
+     * @return the formatted messages logged while it ran
+     */
+    private List<String> captureDataStoreLogs(final Runnable action) {
+        final List<String> messages = Collections.synchronizedList(new ArrayList<>());
+        final AbstractAppender appender = new AbstractAppender("jsonDataStoreCapture", null, null, true, Property.EMPTY_ARRAY) {
+            @Override
+            public void append(final LogEvent event) {
+                messages.add(event.getMessage().getFormattedMessage());
+            }
+        };
+        appender.start();
+        final org.apache.logging.log4j.core.Logger coreLogger =
+                (org.apache.logging.log4j.core.Logger) LogManager.getLogger(JsonDataStore.class);
+        final Level originalLevel = coreLogger.getLevel();
+        coreLogger.addAppender(appender);
+        coreLogger.setLevel(Level.WARN);
+        try {
+            action.run();
+        } finally {
+            coreLogger.setLevel(originalLevel);
+            coreLogger.removeAppender(appender);
+            appender.stop();
+        }
+        return messages;
     }
 
     /**
