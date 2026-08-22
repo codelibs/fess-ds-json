@@ -64,9 +64,12 @@ import com.fasterxml.jackson.databind.RuntimeJsonMappingException;
  * </p>
  *
  * <p>
- * Neither path holds the whole document in memory: records are pulled one at a time. The
- * look-ahead that chooses between them buffers the first non-blank line, which a single record
- * has to fit in anyway.
+ * Neither path holds the whole document in memory: records are pulled one at a time. Neither
+ * does the look-ahead that chooses between them. It is skipped outright whenever it cannot
+ * change the outcome - an explicit {@code format}, or a {@code rootPath} - and when it does run
+ * it never reads more than {@link #PEEK_LIMIT} characters. A minified document has no line
+ * break at all, so its "first line" is the whole file; reaching the limit without finding one
+ * is itself the answer, and the token stream takes over.
  * </p>
  */
 public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>, Closeable {
@@ -80,6 +83,25 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
     /** Reused across all records to avoid a per-record allocation for the same generic type. */
     private final TypeReference<Map<String, Object>> mapTypeReference = new TypeReference<Map<String, Object>>() {
     };
+
+    /**
+     * Upper bound, in characters, on how much of a document the format look-ahead may read.
+     *
+     * <p>
+     * The look-ahead has to buffer what it reads so it can be pushed back, so this bound is what
+     * keeps a minified document - one enormous "line" - from being pulled into memory whole
+     * before anything has even decided how to read it. Nothing is pre-allocated: a document
+     * whose first line is 80 characters long costs 80 characters, not this.
+     * </p>
+     *
+     * <p>
+     * 64K is far more than the shape of a document takes to recognise, and far more than a JSON
+     * Lines record usually is. A JSON Lines document whose first line is longer than this is
+     * read as a token stream instead, which reads it correctly but without per-line failure
+     * isolation; {@code format=jsonl} says so explicitly and skips the look-ahead entirely.
+     * </p>
+     */
+    private static final int PEEK_LIMIT = 65536;
 
     /** The document shape this reader expects. */
     public enum Format {
@@ -157,39 +179,27 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
         MappingIterator<Map<String, Object>> openedIterator = null;
         boolean openedLineOriented = false;
         boolean openedSingleRecordOnly = false;
-        String openedPendingLine = null;
-        int openedLineCounter = 0;
         try {
             openedReader = new BufferedReader(stripBom(new InputStreamReader(in, encoding)));
 
-            // Look ahead at the first non-blank line to see which grammar this document is
-            // written in. Everything consumed here is kept so that whichever path is chosen
-            // still sees the complete document, line breaks included.
-            final StringBuilder consumed = new StringBuilder();
-            String firstLine = null;
-            int blankLines = 0;
-            for (String raw; (raw = readRawLine(openedReader)) != null;) {
-                consumed.append(raw);
-                if (!raw.isBlank()) {
-                    firstLine = raw;
-                    break;
-                }
-                blankLines++;
-            }
-
-            if (isLineDelimited(format, rootPath, firstLine)) {
-                openedLineOriented = true;
-                // The look-ahead already read the first record; hand it straight to next().
-                openedPendingLine = firstLine;
-                openedLineCounter = blankLines + (firstLine != null ? 1 : 0);
-            } else {
+            // Skip the look-ahead entirely when it cannot change the outcome. format=json and a
+            // rootPath both mean "token stream" already, and those are exactly the two
+            // configurations that exist to stream a large structured document - peeking at them
+            // would buffer part of a document whose whole point is not to be buffered.
+            if (StringUtil.isBlank(rootPath) && format != Format.JSON) {
+                // Everything the look-ahead reads is kept so it can be put back: whichever path
+                // runs then sees the document from its very first character, line breaks
+                // included, which is what keeps the line numbers honest.
+                final StringBuilder consumed = new StringBuilder();
+                openedLineOriented = peekIsLineDelimited(openedReader, format, consumed);
                 if (consumed.length() > 0) {
-                    // Put the look-ahead back in front of the rest of the stream so the parser
-                    // reads the document from its very first character.
                     final PushbackReader pushback = new PushbackReader(openedReader, consumed.length());
                     pushback.unread(consumed.toString().toCharArray());
                     openedReader = pushback;
                 }
+            }
+
+            if (!openedLineOriented) {
                 openedParser = objectMapper.getFactory().createParser(openedReader);
 
                 JsonToken token = openedParser.nextToken();
@@ -233,63 +243,112 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
         iterator = openedIterator;
         lineOriented = openedLineOriented;
         singleRecordOnly = openedSingleRecordOnly;
-        pendingLine = openedPendingLine;
-        lineCounter = openedLineCounter;
     }
 
     /**
-     * Decides whether the document should be read one line at a time.
+     * Looks ahead at the start of the document and decides whether it should be read one line at
+     * a time, without reading more than {@link #PEEK_LIMIT} characters.
      *
      * <p>
-     * {@link Format#JSONL} and {@link Format#JSON} say so outright; {@link Format#AUTO} decides
-     * from the first non-whitespace character and, for a document starting with an object, from
-     * whether the first non-blank line is a complete JSON object on its own. A line that parses
-     * standalone means the document is line-delimited; a line that does not means the object
-     * spans lines, which only a token stream can read. A {@code rootPath} always implies the
-     * token stream, since a pointer only makes sense inside a structured document.
+     * {@link Format#JSONL} needs only the first non-whitespace character, and only to reject an
+     * array. {@link Format#AUTO} needs a little more: a leading {@code '['} is an array, and
+     * otherwise the question is whether a line of this document stands alone as a whole record.
+     * The first two non-blank lines are tried, not just the first, because the first line is
+     * exactly the one likely to be broken - a stray log line, a download cut off mid-record. In
+     * JSON Lines the second line is another whole record; in a single pretty-printed object it
+     * is a fragment such as {@code "a": 1,}, which settles it either way.
      * </p>
      *
-     * @param format the requested format
-     * @param rootPath a JSON Pointer selecting a nested value, may be {@code null} or blank
-     * @param firstLine the first non-blank line of the document, or {@code null} if there is none
+     * <p>
+     * Reaching the limit without the line ending is itself an answer: a document with no line
+     * break in its first 64K is a minified document or one enormous record, and the token stream
+     * reads both without buffering.
+     * </p>
+     *
+     * @param in the reader to look ahead in
+     * @param format the requested format, either {@link Format#AUTO} or {@link Format#JSONL}
+     * @param consumed collects every character read, for the caller to push back
      * @return {@code true} to parse each line on its own, {@code false} to run a token stream
+     * @throws IOException if the stream cannot be read
      */
-    private boolean isLineDelimited(final Format format, final String rootPath, final String firstLine) {
-        if (StringUtil.isNotBlank(rootPath) || format == Format.JSON) {
-            return false;
+    private boolean peekIsLineDelimited(final Reader in, final Format format, final StringBuilder consumed) throws IOException {
+        int lineStart = 0;
+        char first = '\0';
+        int c;
+        while (consumed.length() < PEEK_LIMIT && (c = in.read()) != -1) {
+            consumed.append((char) c);
+            if (c == '\n') {
+                lineStart = consumed.length();
+            } else if (!Character.isWhitespace((char) c)) {
+                first = (char) c;
+                break;
+            }
         }
-        final char first = firstNonWhitespace(firstLine);
+
         if (format == Format.JSONL) {
             if (first == '[') {
                 throw new DataStoreException("format=jsonl was requested but the document starts with an array.");
             }
             return true;
         }
-        if (first == '{') {
-            return parsesAsCompleteObject(firstLine);
+        if (first == '\0' || first == '[') {
+            // An empty document, or an array. Anything else that turns out not to be JSON at all
+            // also ends up on the token stream below, which reports the same errors it always has.
+            return false;
         }
-        // An array, an empty document, or something that is neither: let the token stream read
-        // it and report exactly the errors it has always reported.
-        return false;
+
+        final String firstLine = peekLine(in, consumed, lineStart);
+        if (firstLine == null || parsesAsCompleteObject(firstLine)) {
+            return firstLine != null;
+        }
+        final String secondLine = peekNonBlankLine(in, consumed);
+        return secondLine != null && parsesAsCompleteObject(secondLine);
     }
 
     /**
-     * Returns the first character of the given line that is not whitespace.
+     * Reads one line into {@code consumed}, up to and including its {@code '\n'}, within the
+     * remaining look-ahead budget.
      *
-     * @param line the line to inspect, may be {@code null}
-     * @return that character, or {@code '\0'} when the line is {@code null} or all whitespace
+     * @param in the reader to read from
+     * @param consumed the look-ahead buffer to append to
+     * @param start the index in {@code consumed} where this line begins
+     * @return the line, or {@code null} if the budget ran out first or there was nothing left to read
+     * @throws IOException if the stream cannot be read
      */
-    private static char firstNonWhitespace(final String line) {
-        if (line == null) {
-            return '\0';
-        }
-        for (int i = 0; i < line.length(); i++) {
-            final char c = line.charAt(i);
-            if (!Character.isWhitespace(c)) {
-                return c;
+    private static String peekLine(final Reader in, final StringBuilder consumed, final int start) throws IOException {
+        int c;
+        while (consumed.length() < PEEK_LIMIT && (c = in.read()) != -1) {
+            consumed.append((char) c);
+            if (c == '\n') {
+                return consumed.substring(start);
             }
         }
-        return '\0';
+        if (consumed.length() >= PEEK_LIMIT) {
+            return null;
+        }
+        // End of stream: whatever was read is the document's last line, if anything was.
+        return start < consumed.length() ? consumed.substring(start) : null;
+    }
+
+    /**
+     * Reads lines into {@code consumed} until one is not blank, within the remaining look-ahead
+     * budget.
+     *
+     * @param in the reader to read from
+     * @param consumed the look-ahead buffer to append to
+     * @return the next non-blank line, or {@code null} if the budget or the stream ran out first
+     * @throws IOException if the stream cannot be read
+     */
+    private static String peekNonBlankLine(final Reader in, final StringBuilder consumed) throws IOException {
+        for (;;) {
+            final String line = peekLine(in, consumed, consumed.length());
+            if (line == null) {
+                return null;
+            }
+            if (!line.isBlank()) {
+                return line;
+            }
+        }
     }
 
     /**

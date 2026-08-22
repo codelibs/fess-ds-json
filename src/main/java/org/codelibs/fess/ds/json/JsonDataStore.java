@@ -85,6 +85,9 @@ public class JsonDataStore extends AbstractDataStore {
      */
     protected static final int MAX_CONSECUTIVE_TOKEN_FAILURES = 100;
 
+    /** Sentinel for "the previous record did not fail", distinct from every line number including -1. */
+    private static final int NO_FAILING_LINE = Integer.MIN_VALUE;
+
     private String[] fileSuffixes = { ".json", ".jsonl" };
 
     /**
@@ -178,8 +181,8 @@ public class JsonDataStore extends AbstractDataStore {
                 JsonRecordReader reader = new JsonRecordReader(in, fileEncoding, format, rootPath)) {
             int count = 0;
             int consecutiveFailures = 0;
+            int lastFailingLine = NO_FAILING_LINE;
             while (alive && reader.hasNext()) {
-                count++;
                 // reader.next() is attempted here, before the stats key exists, because
                 // getCurrentLineNumber() only reflects the record this call just attempted -
                 // JsonRecordReader records the line a record starts on right before parsing it,
@@ -197,6 +200,30 @@ public class JsonDataStore extends AbstractDataStore {
                     readFailure = t;
                 }
                 final int lineNumber = reader.getCurrentLineNumber();
+
+                if (readFailure == null) {
+                    consecutiveFailures = 0;
+                    lastFailingLine = NO_FAILING_LINE;
+                } else {
+                    consecutiveFailures++;
+                    final boolean sameRegion = lineNumber == lastFailingLine;
+                    lastFailingLine = lineNumber;
+                    if (sameRegion) {
+                        // The token stream is still picking its way through the same unparseable
+                        // stretch it already reported - it steps over one character at a time and
+                        // raises a fresh failure for each. Reporting every one of those would
+                        // multiply a single bad region into a pile of identical failure records
+                        // against the same URL and flood the log. It still counts towards the
+                        // give-up bound below, whose warning carries the real total.
+                        if (!reader.isLineOriented() && consecutiveFailures >= MAX_CONSECUTIVE_TOKEN_FAILURES) {
+                            warnGaveUp(source, consecutiveFailures, reader);
+                            break;
+                        }
+                        continue;
+                    }
+                }
+
+                count++;
                 final StatsKeyObject statsKey = new StatsKeyObject(source.getName() + "@" + (lineNumber >= 0 ? lineNumber : count));
                 paramMap.put(Constants.CRAWLER_STATS_KEY, statsKey);
                 final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
@@ -242,26 +269,14 @@ public class JsonDataStore extends AbstractDataStore {
                 if (aborted) {
                     break;
                 }
-                if (readFailure == null) {
-                    consecutiveFailures = 0;
-                } else {
-                    consecutiveFailures++;
-                    // A line-oriented read always moves on to the next line, so a bad record only
-                    // ever costs that record. A token stream may instead be stuck on a remainder it
-                    // can never resynchronize with - a document truncated mid-object keeps failing
-                    // without ever reaching end of stream - so give up on this source once it has
-                    // produced nothing but failures for long enough.
-                    if (!reader.isLineOriented() && consecutiveFailures >= MAX_CONSECUTIVE_TOKEN_FAILURES) {
-                        // The line number below is approximate: these failures come from the reader
-                        // looking for the next record and never finding one, so
-                        // getCurrentLineNumber() still reports where the last record it read
-                        // successfully began.
-                        logger.warn(
-                                "Gave up on {} after {} consecutive parse failures near line {}: the document does not "
-                                        + "resynchronize. The rest of it was not read.",
-                                source.getName(), consecutiveFailures, reader.getCurrentLineNumber());
-                        break;
-                    }
+                // A line-oriented read always moves on to the next line, so a bad record only ever
+                // costs that record. A token stream may instead be stuck on a remainder it can
+                // never resynchronize with - a document truncated mid-object keeps failing without
+                // ever reaching end of stream - so give up on this source once it has produced
+                // nothing but failures for long enough.
+                if (readFailure != null && !reader.isLineOriented() && consecutiveFailures >= MAX_CONSECUTIVE_TOKEN_FAILURES) {
+                    warnGaveUp(source, consecutiveFailures, reader);
+                    break;
                 }
                 if (readInterval > 0) {
                     sleep(readInterval);
@@ -275,6 +290,25 @@ public class JsonDataStore extends AbstractDataStore {
             recordSourceFailure(dataConfig, source, e);
         }
         return !aborted;
+    }
+
+    /**
+     * Logs the one warning that a source was abandoned because its token stream stopped making
+     * progress.
+     *
+     * <p>
+     * The line number is approximate: these failures come from the reader looking for the next
+     * record and never finding one, so {@link JsonRecordReader#getCurrentLineNumber()} still
+     * reports where the last record it read successfully began.
+     * </p>
+     *
+     * @param source the source being abandoned
+     * @param consecutiveFailures how many failures in a row it produced, reported or suppressed
+     * @param reader the reader, for its approximate position
+     */
+    private void warnGaveUp(final JsonSource source, final int consecutiveFailures, final JsonRecordReader reader) {
+        logger.warn("Gave up on {} after {} consecutive parse failures near line {}: the document does not resynchronize. "
+                + "The rest of it was not read.", source.getName(), consecutiveFailures, reader.getCurrentLineNumber());
     }
 
     /**

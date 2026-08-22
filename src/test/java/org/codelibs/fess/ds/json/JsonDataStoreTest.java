@@ -670,10 +670,84 @@ public class JsonDataStoreTest extends UnitDsTestCase {
                     captureDataStoreLogs(() -> dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>()));
 
             assertEquals("the record before the truncation is stored", 1, callback.getDataMapList().size());
-            assertTrue("the token stream must keep trying past the first failure and then give up, not stop at one "
-                    + "and not run forever: " + failureUrls.size(), failureUrls.size() > 1 && failureUrls.size() <= 100);
-            assertTrue("giving up must be said out loud, naming the source: " + logMessages,
-                    logMessages.stream().anyMatch(m -> m.startsWith("Gave up on ") && m.contains(file.toString())));
+            assertEquals("one unparseable region is one failure record, however many times the parser trips over " + "it: " + failureUrls,
+                    1, failureUrls.size());
+            assertTrue("giving up must be said out loud, naming the source and carrying the real total: " + logMessages, logMessages
+                    .stream()
+                    .anyMatch(m -> m.startsWith("Gave up on ") && m.contains(file.toString())
+                            && m.contains("after " + JsonDataStore.MAX_CONSECUTIVE_TOKEN_FAILURES + " consecutive parse failures")));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * 1行目が壊れている3つの形でも2行目以降が失われないことを検証する。bare word、
+     * '{' 始まり、そして途中で切れた1行目。AUTO は既定であり、途中で切れたダウンロードは
+     * まさにこの形になる。1行目だけを見て判定すると、これらは「整形済み単一オブジェクト」と
+     * 誤判定されてトークンストリームに載り、後続レコードが黙って消える。
+     */
+    @Test
+    public void test_storeData_recoversFromMalformedFirstLine() throws Exception {
+        final String tail = "{\"url\":\"http://example.com/2\"}\n{\"url\":\"http://example.com/3\"}\n";
+        assertFirstLineShape("bare word", "not json\n" + tail);
+        assertFirstLineShape("brace prefixed", "{not valid json\n" + tail);
+        assertFirstLineShape("truncated", "{\"url\":\n" + tail);
+    }
+
+    /**
+     * 1行目が壊れたファイルを storeData に通し、残り2レコードが登録され失敗が1件だけ
+     * 記録されることを検証する。
+     *
+     * @param shape 失敗時のメッセージに使う形の名前
+     * @param content ファイル内容。1行目が不正、続く2行が正常なレコード
+     * @throws Exception 一時ファイルの操作に失敗した場合
+     */
+    private void assertFirstLineShape(final String shape, final String content) throws Exception {
+        final Path file = Files.createTempFile("firstline", ".jsonl");
+
+        try {
+            Files.writeString(file, content);
+            failureUrls.clear();
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals(shape + ": the two records after the bad first line are stored: " + callback.getDataMapList(), 2,
+                    callback.getDataMapList().size());
+            assertEquals(shape + ": only the first line is recorded as a failure: " + failureUrls, 1, failureUrls.size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * 配列内の1件の不正な要素が、失敗記録1件で報告されることを検証する。トークンストリームは
+     * 不正な区間を1文字ずつ踏み越えながら失敗を繰り返すため、素直に記録すると同じ URL に
+     * 対する同一の失敗記録が積み上がる。
+     */
+    @Test
+    public void test_storeData_oneBadArrayElementIsOneFailure() throws Exception {
+        final Path file = Files.createTempFile("badelement", ".json");
+
+        try {
+            Files.writeString(file, "[\n" + "  {\"url\":\"http://example.com/1\"},\n" + "  {not an element},\n"
+                    + "  {\"url\":\"http://example.com/3\"}\n" + "]\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("one bad element is one failure record, not one per parser hiccup: " + failureUrls, 1, failureUrls.size());
         } finally {
             Files.deleteIfExists(file);
         }

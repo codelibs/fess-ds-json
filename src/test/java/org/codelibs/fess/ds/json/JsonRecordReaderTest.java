@@ -161,6 +161,48 @@ public class JsonRecordReaderTest {
         assertTrue(records.get(0).get("b") instanceof Map, "the nested object survives, so the document was not read line by line");
     }
 
+    /**
+     * A minified document's "first line" is the whole file. The look-ahead must give up at its
+     * limit and hand the document to the token stream rather than buffer it looking for a line
+     * break that never comes.
+     */
+    @Test
+    public void test_auto_documentWithNoLineBreakIsNotBuffered() throws IOException {
+        final StringBuilder json = new StringBuilder("{");
+        for (int i = 0; json.length() < 300000; i++) {
+            if (i > 0) {
+                json.append(',');
+            }
+            json.append("\"k").append(i).append("\":").append(i);
+        }
+        final String minified = json.append('}').toString();
+
+        try (JsonRecordReader reader = openReader(minified, Format.AUTO, null)) {
+            assertFalse(reader.isLineOriented(), "a document with no line break is read as a token stream");
+        }
+        final List<Map<String, Object>> records = readAll(minified);
+        assertEquals(1, records.size());
+        assertEquals(0, records.get(0).get("k0"));
+    }
+
+    /**
+     * A broken first line must not be mistaken for the opening of a pretty-printed object: the
+     * second non-blank line settles which it is.
+     */
+    @Test
+    public void test_auto_malformedFirstLineIsStillJsonLines() throws IOException {
+        assertTrue(isLineOriented("not json\n{\"a\":2}\n{\"a\":3}\n"), "a stray log line above real records is JSON Lines");
+        assertTrue(isLineOriented("{not valid json\n{\"a\":2}\n"), "a broken record above a real one is JSON Lines");
+        assertTrue(isLineOriented("{\"a\":\n{\"a\":2}\n"), "a record cut off mid-download is JSON Lines");
+        assertFalse(isLineOriented("{\n  \"a\": 1,\n  \"b\": 2\n}\n"), "a pretty-printed object is not");
+    }
+
+    private boolean isLineOriented(final String json) throws IOException {
+        try (JsonRecordReader reader = openReader(json, Format.AUTO, null)) {
+            return reader.isLineOriented();
+        }
+    }
+
     @Test
     public void test_parseFormat() {
         assertEquals(Format.AUTO, JsonRecordReader.parseFormat(null));
