@@ -45,9 +45,9 @@ import org.codelibs.fess.ds.json.UnitDsTestCase;
  * Tests cover file detection, encoding handling, JSON/JSONL processing,
  * file list management, and error scenarios.
  *
- * Note: Some tests that require full DI container initialization (e.g., CrawlerStatsHelper)
- * are designed to handle exceptions (NullPointerException, ComponentNotFoundException)
- * gracefully, as these dependencies may not be available in the unit test environment.
+ * Note: setUp registers SystemHelper, an initialized CrawlerStatsHelper and a recording
+ * FailureUrlService stub in the DI container so that storeData tests exercise the full
+ * pipeline (including error recording) rather than mocking or catching exceptions.
  */
 public class JsonDataStoreTest extends UnitDsTestCase {
     public JsonDataStore dataStore;
@@ -417,22 +417,38 @@ public class JsonDataStoreTest extends UnitDsTestCase {
         final Path tempDir = Files.createTempDirectory("jsontest");
         final Path jsonFile = tempDir.resolve("a.json");
         final Path jsonlFile = tempDir.resolve("b.jsonl");
-        Files.writeString(jsonFile, "{\"id\":\"123\",\"title\":\"Test\",\"url\":\"http://example.com/1\"}\n");
-        Files.writeString(jsonlFile, "{\"id\":\"1\",\"title\":\"First\",\"url\":\"http://example.com/2\"}\n"
-                + "{\"id\":\"2\",\"title\":\"Second\",\"url\":\"http://example.com/3\"}\n");
 
-        final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
-        final DataStoreParams params = new DataStoreParams();
-        params.put("directories", tempDir.toString());
-        final Map<String, String> scriptMap = new HashMap<>();
-        scriptMap.put("url", "url");
-        scriptMap.put("title", "title");
+        try {
+            Files.writeString(jsonFile, "{\"id\":\"123\",\"title\":\"Test\",\"url\":\"http://example.com/1\"}\n");
+            Files.writeString(jsonlFile, "{\"id\":\"1\",\"title\":\"First\",\"url\":\"http://example.com/2\"}\n"
+                    + "{\"id\":\"2\",\"title\":\"Second\",\"url\":\"http://example.com/3\"}\n");
 
-        dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("directories", tempDir.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+            scriptMap.put("title", "title");
 
-        assertEquals("1 record from .json + 2 records from .jsonl", 3, callback.getDataMapList().size());
-        assertEquals("no failures should be recorded", 0, failureUrls.size());
-        assertEquals("Test", callback.getDataMapList().get(0).get("title"));
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            final List<Map<String, Object>> dataMapList = callback.getDataMapList();
+            assertEquals("1 record from .json + 2 records from .jsonl", 3, dataMapList.size());
+            assertEquals("no failures should be recorded", 0, failureUrls.size());
+
+            // Processing order between files is not guaranteed (it depends on filesystem
+            // mtime resolution), so look up each record by its unique url instead of
+            // asserting on list position.
+            final Map<String, Object> firstJsonRecord =
+                    dataMapList.stream().filter(m -> "http://example.com/1".equals(m.get("url"))).findFirst().orElse(null);
+            assertNotNull("missing record for http://example.com/1", firstJsonRecord);
+            assertEquals("Test", firstJsonRecord.get("title"));
+
+        } finally {
+            Files.deleteIfExists(jsonFile);
+            Files.deleteIfExists(jsonlFile);
+            Files.deleteIfExists(tempDir);
+        }
     }
 
     /**
@@ -441,19 +457,29 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     @Test
     public void test_storeData_fileFiltering() throws Exception {
         final Path tempDir = Files.createTempDirectory("jsontest");
-        Files.writeString(tempDir.resolve("a.json"), "{\"url\":\"http://example.com/1\"}\n");
-        Files.writeString(tempDir.resolve("b.txt"), "{\"url\":\"http://example.com/2\"}\n");
+        final Path jsonFile = tempDir.resolve("a.json");
+        final Path txtFile = tempDir.resolve("b.txt");
 
-        final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
-        final DataStoreParams params = new DataStoreParams();
-        params.put("directories", tempDir.toString());
-        final Map<String, String> scriptMap = new HashMap<>();
-        scriptMap.put("url", "url");
+        try {
+            Files.writeString(jsonFile, "{\"url\":\"http://example.com/1\"}\n");
+            Files.writeString(txtFile, "{\"url\":\"http://example.com/2\"}\n");
 
-        dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("directories", tempDir.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
 
-        assertEquals("only the .json file is processed", 1, callback.getDataMapList().size());
-        assertEquals("http://example.com/1", callback.getDataMapList().get(0).get("url"));
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("only the .json file is processed", 1, callback.getDataMapList().size());
+            assertEquals("http://example.com/1", callback.getDataMapList().get(0).get("url"));
+
+        } finally {
+            Files.deleteIfExists(jsonFile);
+            Files.deleteIfExists(txtFile);
+            Files.deleteIfExists(tempDir);
+        }
     }
 
     /**
