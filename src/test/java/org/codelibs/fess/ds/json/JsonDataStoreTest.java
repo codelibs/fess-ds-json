@@ -21,6 +21,7 @@ import org.junit.jupiter.api.TestInfo;
 import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -599,6 +600,37 @@ public class JsonDataStoreTest extends UnitDsTestCase {
 
             assertEquals("two records are stored", 2, callback.getDataMapList().size());
             assertEquals("blank lines are not recorded as failures: " + failureUrls, 0, failureUrls.size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * UTF-8 BOM 付きファイルの先頭レコードが読めることを検証する。
+     */
+    @Test
+    public void test_storeData_stripsUtf8Bom() throws Exception {
+        final Path file = Files.createTempFile("bom", ".jsonl");
+
+        try {
+            final byte[] bom = { (byte) 0xEF, (byte) 0xBB, (byte) 0xBF };
+            final byte[] body = "{\"url\":\"http://example.com/1\"}\n{\"url\":\"http://example.com/2\"}\n".getBytes(StandardCharsets.UTF_8);
+            final byte[] content = new byte[bom.length + body.length];
+            System.arraycopy(bom, 0, content, 0, bom.length);
+            System.arraycopy(body, 0, content, bom.length, body.length);
+            Files.write(file, content);
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("both records are stored: " + failureUrls, 2, callback.getDataMapList().size());
+            assertEquals("no failures", 0, failureUrls.size());
+            assertEquals("http://example.com/1", callback.getDataMapList().get(0).get("url"));
         } finally {
             Files.deleteIfExists(file);
         }

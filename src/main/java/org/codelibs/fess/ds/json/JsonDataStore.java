@@ -180,6 +180,9 @@ public class JsonDataStore extends AbstractDataStore {
             int count = 0;
             for (String line; (line = br.readLine()) != null;) {
                 count++;
+                if (count == 1) {
+                    line = stripBom(line);
+                }
                 if (StringUtil.isBlank(line)) {
                     // A blank line is not a record. Skipping it silently keeps it out of
                     // the failure URL list, matching how CsvDataStore treats empty rows.
@@ -227,6 +230,28 @@ public class JsonDataStore extends AbstractDataStore {
         } catch (final IOException e) {
             logger.warn("IO Error occurred while reading source file.", e);
         }
+    }
+
+    /** Zero-width no-break space, i.e. the character a UTF-8 BOM decodes to. */
+    private static final char BOM_CHAR = '﻿';
+
+    /**
+     * Removes a leading byte order mark from the first line of a file.
+     *
+     * <p>
+     * {@link InputStreamReader} decodes a UTF-8 BOM to U+FEFF and hands it to the caller
+     * rather than discarding it, which makes the first JSON object of a BOM-prefixed file
+     * unparseable.
+     * </p>
+     *
+     * @param line the line to clean
+     * @return the line without a leading BOM
+     */
+    private String stripBom(final String line) {
+        if (!line.isEmpty() && line.charAt(0) == BOM_CHAR) {
+            return line.substring(1);
+        }
+        return line;
     }
 
     /**
