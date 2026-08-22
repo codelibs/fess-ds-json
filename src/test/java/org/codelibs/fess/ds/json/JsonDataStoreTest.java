@@ -637,8 +637,42 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
+     * BOM-only first line followed by real records should result in no failures.
+     * This test enforces that BOM stripping occurs BEFORE the blank line check,
+     * so that a line containing only a BOM is correctly treated as blank and skipped.
+     */
+    @Test
+    public void test_storeData_bomOnlyFirstLineThenRecords() throws Exception {
+        final Path file = Files.createTempFile("bomonly", ".jsonl");
+
+        try {
+            final byte[] bom = { (byte) 0xEF, (byte) 0xBB, (byte) 0xBF };
+            final byte[] body =
+                    "\n{\"url\":\"http://example.com/1\"}\n{\"url\":\"http://example.com/2\"}\n".getBytes(StandardCharsets.UTF_8);
+            final byte[] content = new byte[bom.length + body.length];
+            System.arraycopy(bom, 0, content, 0, bom.length);
+            System.arraycopy(body, 0, content, bom.length, body.length);
+            Files.write(file, content);
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("both records stored despite BOM-only first line", 2, callback.getDataMapList().size());
+            assertEquals("no failures when BOM stripped before blank check: " + failureUrls, 0, failureUrls.size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
      * Helper method to invoke private methods using reflection.
      */
+
     @SuppressWarnings("unchecked")
     private <T> T invokeMethod(Object obj, String methodName, Object... args) throws Exception {
         Class<?>[] paramTypes = new Class<?>[args.length];

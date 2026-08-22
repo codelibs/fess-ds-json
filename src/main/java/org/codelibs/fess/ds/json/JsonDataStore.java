@@ -233,7 +233,8 @@ public class JsonDataStore extends AbstractDataStore {
     }
 
     /** Zero-width no-break space, i.e. the character a UTF-8 BOM decodes to. */
-    private static final char BOM_CHAR = '﻿';
+    /** Zero-width no-break space, i.e. the character a UTF-8 BOM decodes to. */
+    private static final char BOM_CHAR = '\uFEFF';
 
     /**
      * Removes a leading byte order mark from the first line of a file.
