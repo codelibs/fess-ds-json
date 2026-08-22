@@ -695,6 +695,42 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
+     * alive をファイルループの外側だけでなく processFile 内のレコードループでも
+     * 見ていることを検証する。1件目を store() した直後に stop() を呼び、2件目が
+     * 処理されないことを、件数だけでなく内容（1件目の url）でも確認する。件数だけの
+     * 比較だと、内側の alive チェックが失われて2件目が残ってしまっても検出できない。
+     */
+    @Test
+    public void test_storeData_stopsMidRecordLoop() throws Exception {
+        final Path file = Files.createTempFile("stopmid", ".jsonl");
+
+        try {
+            Files.writeString(file, "{\"url\":\"http://example.com/1\"}\n{\"url\":\"http://example.com/2\"}\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback() {
+                @Override
+                public void store(final DataStoreParams paramMap, final Map<String, Object> dataMap) {
+                    super.store(paramMap, dataMap);
+                    // Stop mid-crawl, from inside the very callback the record loop drives.
+                    dataStore.stop();
+                }
+            };
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            final List<Map<String, Object>> dataMapList = callback.getDataMapList();
+            assertEquals("only the first record is processed before stop() takes effect", 1, dataMapList.size());
+            assertEquals("the surviving record is the first one", "http://example.com/1", dataMapList.get(0).get("url"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
      * Helper method to invoke private methods using reflection.
      */
 
