@@ -119,4 +119,89 @@ public class JsonRecordReaderTest {
         assertEquals(Format.JSON, JsonRecordReader.parseFormat("json"));
         assertThrows(DataStoreException.class, () -> JsonRecordReader.parseFormat("yaml"));
     }
+
+    @Test
+    public void test_rootPath_nestedArray() throws IOException {
+        final String json = "{\"meta\":{\"n\":2},\"data\":{\"items\":[{\"a\":1},{\"a\":2}]},\"tail\":9}";
+        final List<Map<String, Object>> list = readAll(json, Format.AUTO, "/data/items");
+        assertEquals(2, list.size());
+        assertEquals(1, list.get(0).get("a"));
+        assertEquals(2, list.get(1).get("a"));
+    }
+
+    @Test
+    public void test_rootPath_topLevelArray() throws IOException {
+        final String json = "{\"items\":[{\"a\":1}]}";
+        assertEquals(1, readAll(json, Format.AUTO, "/items").size());
+    }
+
+    @Test
+    public void test_rootPath_pointsAtObject() throws IOException {
+        final String json = "{\"data\":{\"a\":1}}";
+        final List<Map<String, Object>> list = readAll(json, Format.AUTO, "/data");
+        assertEquals(1, list.size());
+        assertEquals(1, list.get(0).get("a"));
+    }
+
+    @Test
+    public void test_rootPath_notFound_yieldsNoRecords() throws IOException {
+        final String json = "{\"data\":{\"items\":[{\"a\":1}]}}";
+        assertEquals(0, readAll(json, Format.AUTO, "/missing/path").size());
+    }
+
+    @Test
+    public void test_rootPath_emptyNestedArray() throws IOException {
+        assertEquals(0, readAll("{\"data\":{\"items\":[]}}", Format.AUTO, "/data/items").size());
+    }
+
+    @Test
+    public void test_getCurrentLineNumber_beforeFirstRecord() throws IOException {
+        final InputStream in = new ByteArrayInputStream("{\"a\":1}\n".getBytes(StandardCharsets.UTF_8));
+        try (JsonRecordReader reader = new JsonRecordReader(in, "UTF-8", Format.AUTO, null)) {
+            assertEquals(-1, reader.getCurrentLineNumber());
+        }
+    }
+
+    @Test
+    public void test_getCurrentLineNumber_jsonl() throws IOException {
+        final InputStream in = new ByteArrayInputStream("{\"a\":1}\n{\"a\":2}\n{\"a\":3}\n".getBytes(StandardCharsets.UTF_8));
+        final List<Integer> lineNumbers = new ArrayList<>();
+        try (JsonRecordReader reader = new JsonRecordReader(in, "UTF-8", Format.AUTO, null)) {
+            while (reader.hasNext()) {
+                reader.next();
+                lineNumbers.add(reader.getCurrentLineNumber());
+            }
+        }
+        // Records sit on lines 1, 2 and 3.
+        assertEquals(List.of(1, 2, 3), lineNumbers);
+    }
+
+    @Test
+    public void test_getCurrentLineNumber_skipsBlankLine() throws IOException {
+        final InputStream in = new ByteArrayInputStream("{\"a\":1}\n\n{\"a\":2}\n".getBytes(StandardCharsets.UTF_8));
+        final List<Integer> lineNumbers = new ArrayList<>();
+        try (JsonRecordReader reader = new JsonRecordReader(in, "UTF-8", Format.AUTO, null)) {
+            while (reader.hasNext()) {
+                reader.next();
+                lineNumbers.add(reader.getCurrentLineNumber());
+            }
+        }
+        // Line 2 is blank; the second record actually begins on line 3.
+        assertEquals(List.of(1, 3), lineNumbers);
+    }
+
+    @Test
+    public void test_getCurrentLineNumber_prettyPrintedArray() throws IOException {
+        final String json = "[\n  {\n    \"a\": 1\n  },\n  {\n    \"a\": 2\n  }\n]\n";
+        final List<Integer> lineNumbers = new ArrayList<>();
+        final InputStream in = new ByteArrayInputStream(json.getBytes(StandardCharsets.UTF_8));
+        try (JsonRecordReader reader = new JsonRecordReader(in, "UTF-8", Format.AUTO, null)) {
+            while (reader.hasNext()) {
+                reader.next();
+                lineNumbers.add(reader.getCurrentLineNumber());
+            }
+        }
+        // The first object starts on line 2, the second on line 5.
+        assertEquals(List.of(2, 5), lineNumbers);
+    }
 }
