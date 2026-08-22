@@ -36,9 +36,12 @@ import org.apache.logging.log4j.Logger;
 import org.codelibs.core.lang.StringUtil;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.app.service.FailureUrlService;
+import org.codelibs.fess.crawler.exception.CrawlingAccessException;
+import org.codelibs.fess.crawler.exception.MultipleCrawlingAccessException;
 import org.codelibs.fess.ds.AbstractDataStore;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.entity.DataStoreParams;
+import org.codelibs.fess.exception.DataStoreCrawlingException;
 import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.helper.CrawlerStatsHelper;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsAction;
@@ -103,7 +106,14 @@ public class JsonDataStore extends AbstractDataStore {
         }
 
         for (final File file : fileList) {
-            processFile(dataConfig, callback, paramMap, scriptMap, defaultDataMap, file, fileEncoding);
+            if (!alive) {
+                logger.info("Stopped crawling: {}", file.getAbsolutePath());
+                break;
+            }
+            if (!processFile(dataConfig, callback, paramMap, scriptMap, defaultDataMap, file, fileEncoding)) {
+                // The data store was asked to abort on this record; stop reading further files.
+                break;
+            }
         }
     }
 
@@ -169,16 +179,29 @@ public class JsonDataStore extends AbstractDataStore {
         return paramMap.getAsString(FILE_ENCODING_PARAM, Constants.UTF_8);
     }
 
-    private void processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
+    /**
+     * Processes a single file and stores each record through the callback.
+     *
+     * @param dataConfig the data store configuration
+     * @param callback the index update callback
+     * @param paramMap the data store parameters
+     * @param scriptMap the script mappings for field conversion
+     * @param defaultDataMap the default data values
+     * @param file the file to process
+     * @param fileEncoding the character encoding of the file
+     * @return {@code false} if crawling must stop, {@code true} to continue with the next file
+     */
+    private boolean processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap, final File file, final String fileEncoding) {
         final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
         final ObjectMapper objectMapper = new ObjectMapper();
 
         final String scriptType = getScriptType(paramMap);
         logger.info("Loading {}", file.getAbsolutePath());
+        boolean aborted = false;
         try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(file), fileEncoding))) {
             int count = 0;
-            for (String line; (line = br.readLine()) != null;) {
+            for (String line; alive && (line = br.readLine()) != null;) {
                 count++;
                 if (count == 1) {
                     line = stripBom(line);
@@ -216,13 +239,52 @@ public class JsonDataStore extends AbstractDataStore {
 
                     callback.store(paramMap, dataMap);
                     crawlerStatsHelper.record(statsKey, StatsAction.FINISHED);
+                } catch (final CrawlingAccessException e) {
+                    logger.warn("Crawling Access Exception at : {}", dataMap, e);
+
+                    Throwable target = e;
+                    if (target instanceof final MultipleCrawlingAccessException ex) {
+                        final Throwable[] causes = ex.getCauses();
+                        if (causes.length > 0) {
+                            target = causes[causes.length - 1];
+                        }
+                    }
+
+                    String errorName;
+                    final Throwable cause = target.getCause();
+                    if (cause != null) {
+                        errorName = cause.getClass().getCanonicalName();
+                    } else {
+                        errorName = target.getClass().getCanonicalName();
+                    }
+
+                    String url = statsKey.getId();
+                    if (target instanceof final DataStoreCrawlingException dce) {
+                        if (dce.getUrl() != null) {
+                            url = dce.getUrl();
+                        }
+                        if (dce.aborted()) {
+                            aborted = true;
+                        }
+                    }
+
+                    final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
+                    failureUrlService.store(dataConfig, errorName, url, target);
+                    crawlerStatsHelper.record(statsKey, StatsAction.ACCESS_EXCEPTION);
                 } catch (final Throwable t) {
                     logger.warn("Crawling Access Exception at : {}", dataMap, t);
                     final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
                     failureUrlService.store(dataConfig, t.getClass().getCanonicalName(), statsKey.getId(), t);
                     crawlerStatsHelper.record(statsKey, StatsAction.EXCEPTION);
                 } finally {
+                    // Call done() exactly once per record regardless of the outcome above, then break
+                    // out of the loop afterwards if the exception handler asked us to abort - avoids
+                    // the harmless-but-confusing double done() call that calling it again before break
+                    // would cause (CrawlerStatsHelper#done treats a second call as a silent no-op).
                     crawlerStatsHelper.done(statsKey);
+                }
+                if (aborted) {
+                    break;
                 }
             }
         } catch (final FileNotFoundException e) {
@@ -230,6 +292,7 @@ public class JsonDataStore extends AbstractDataStore {
         } catch (final IOException e) {
             logger.warn("IO Error occurred while reading source file.", e);
         }
+        return !aborted;
     }
 
     /** Zero-width no-break space, i.e. the character a UTF-8 BOM decodes to. */

@@ -670,6 +670,31 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
+     * stop() 後は alive が false になり、レコードが処理されないことを検証する。
+     */
+    @Test
+    public void test_storeData_stopsWhenNotAlive() throws Exception {
+        final Path file = Files.createTempFile("stop", ".jsonl");
+
+        try {
+            Files.writeString(file, "{\"url\":\"http://example.com/1\"}\n{\"url\":\"http://example.com/2\"}\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.stop();
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("nothing is processed after stop()", 0, callback.getDataMapList().size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
      * Helper method to invoke private methods using reflection.
      */
 
