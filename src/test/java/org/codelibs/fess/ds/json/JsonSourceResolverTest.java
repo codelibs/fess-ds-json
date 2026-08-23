@@ -44,6 +44,92 @@ public class JsonSourceResolverTest {
         assertThrows(DataStoreException.class, () -> resolver.resolve(new DataStoreParams()));
     }
 
+    /**
+     * Remote sources are a later phase, so {@code urls} must be refused rather than accepted and
+     * ignored. Ignored, it yields no exception, no failure record and no documents at all.
+     */
+    @Test
+    public void test_urls_isRejectedUntilImplemented() {
+        final DataStoreParams params = new DataStoreParams();
+        params.put("urls", "http://example.com/a.json");
+
+        final DataStoreException e = assertThrows(DataStoreException.class, () -> resolver.resolve(params));
+        assertTrue(e.getMessage().contains("urls"), "the message must name the parameter: " + e.getMessage());
+    }
+
+    /**
+     * A malformed pattern must be reported against the parameter carrying it, not as a bare
+     * {@link java.util.regex.PatternSyntaxException} that names only the expression.
+     */
+    @Test
+    public void test_malformedPattern_namesTheParameter() throws IOException {
+        final Path dir = Files.createTempDirectory("res");
+        try {
+            final DataStoreParams params = new DataStoreParams();
+            params.put("directories", dir.toString());
+            params.put("include_pattern", "[unclosed");
+
+            final DataStoreException e = assertThrows(DataStoreException.class, () -> resolver.resolve(params));
+            assertTrue(e.getMessage().contains("include_pattern"), "the message must name the parameter: " + e.getMessage());
+        } finally {
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    /**
+     * Two directory roots where one contains the other must not read the shared files twice.
+     * The index outcome is harmless - the same URL overwrites itself - but the crawl does the
+     * work twice and the crawler statistics count it twice.
+     */
+    @Test
+    public void test_overlappingDirectoryRoots_collectEachFileOnce() throws IOException {
+        final Path dir = Files.createTempDirectory("res");
+        final Path top = dir.resolve("top.json");
+        final Path sub = dir.resolve("sub");
+        final Path nested = sub.resolve("nested.json");
+        try {
+            Files.createFile(top);
+            Files.createDirectory(sub);
+            Files.createFile(nested);
+
+            final DataStoreParams params = new DataStoreParams();
+            params.put("directories", dir + "," + sub);
+            params.put("recursive", "true");
+
+            final List<String> names = names(params);
+            assertEquals(2, names.size(), "the nested file is collected once, not once per root: " + names);
+            assertEquals(1, names.stream().filter("nested.json"::equals).count(), names.toString());
+        } finally {
+            Files.deleteIfExists(nested);
+            Files.deleteIfExists(sub);
+            Files.deleteIfExists(top);
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    /**
+     * A file named in {@code files} that also sits in a scanned directory must be handed to the
+     * crawl once. The two parameters were mutually exclusive before this phase, so this overlap
+     * was not reachable then.
+     */
+    @Test
+    public void test_fileAlsoInScannedDirectory_isCollectedOnce() throws IOException {
+        final Path dir = Files.createTempDirectory("res");
+        final Path both = dir.resolve("both.json");
+        try {
+            Files.createFile(both);
+
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", both.toString());
+            params.put("directories", dir.toString());
+
+            assertEquals(List.of("both.json"), names(params));
+        } finally {
+            Files.deleteIfExists(both);
+            Files.deleteIfExists(dir);
+        }
+    }
+
     @Test
     public void test_filesAndDirectories_areCombined() throws IOException {
         final Path dir = Files.createTempDirectory("res");

@@ -106,6 +106,10 @@ public class JsonDataStore extends AbstractDataStore {
     /** Sentinel for "the previous record did not fail", distinct from every line number including -1. */
     private static final int NO_FAILING_LINE = Integer.MIN_VALUE;
 
+    /** The parameters carrying a regular expression, checked before any source is opened. */
+    private static final List<String> PATTERN_PARAMS =
+            List.of(JsonSourceResolver.INCLUDE_PATTERN_PARAM, JsonSourceResolver.EXCLUDE_PATTERN_PARAM);
+
     private String[] fileSuffixes = { ".json", ".jsonl" };
 
     /**
@@ -137,10 +141,24 @@ public class JsonDataStore extends AbstractDataStore {
             // every remaining source instead of reporting a plain configuration error.
             format = JsonRecordReader.parseFormat(paramMap.getAsString(FORMAT_PARAM));
         } catch (final DataStoreException e) {
-            logger.warn("Invalid {} parameter.", FORMAT_PARAM, e);
-            ComponentUtil.getComponent(FailureUrlService.class)
-                    .store(dataConfig, e.getClass().getCanonicalName(), getName() + ":" + FORMAT_PARAM, e);
+            recordParameterFailure(dataConfig, FORMAT_PARAM, e);
             return;
+        }
+        // The pattern parameters get the same treatment, and mostly for the same reason: an
+        // uncaught PatternSyntaxException abandons the whole data config and is filed against
+        // configId:name rather than against the parameter the user got wrong. They deliberately
+        // do NOT get max_depth's treatment - warn and carry on with a default - because there is
+        // no safe default for them. Dropping a broken include_pattern widens the crawl from
+        // "only these files" to "every file"; dropping a broken exclude_pattern indexes exactly
+        // what the user asked to keep out. Refusing to crawl is recoverable; crawling more than
+        // was asked for is not.
+        for (final String patternParam : PATTERN_PARAMS) {
+            try {
+                JsonSourceResolver.compilePattern(patternParam, paramMap.getAsString(patternParam));
+            } catch (final DataStoreException e) {
+                recordParameterFailure(dataConfig, patternParam, e);
+                return;
+            }
         }
         final String rootPath = paramMap.getAsString(ROOT_PATH_PARAM);
         if (StringUtil.isNotBlank(rootPath) && format == JsonRecordReader.Format.JSONL) {
@@ -168,6 +186,27 @@ public class JsonDataStore extends AbstractDataStore {
                 break;
             }
         }
+    }
+
+    /**
+     * Reports a configuration error against the parameter that caused it, rather than letting it
+     * escape {@code storeData}.
+     *
+     * <p>
+     * An exception thrown out of {@code storeData} abandons every remaining source and is
+     * attributed by {@code DataIndexHelper} to the data config as a whole, so nothing in the
+     * failure record says which parameter was wrong. A failure record named after the parameter
+     * does, and the crawl ends the same way it would have anyway: with nothing indexed.
+     * </p>
+     *
+     * @param dataConfig the data configuration being crawled
+     * @param paramName the parameter carrying the unusable value
+     * @param e the failure it produced
+     */
+    private void recordParameterFailure(final DataConfig dataConfig, final String paramName, final DataStoreException e) {
+        logger.warn("Invalid {} parameter.", paramName, e);
+        ComponentUtil.getComponent(FailureUrlService.class)
+                .store(dataConfig, e.getClass().getCanonicalName(), getName() + ":" + paramName, e);
     }
 
     /**

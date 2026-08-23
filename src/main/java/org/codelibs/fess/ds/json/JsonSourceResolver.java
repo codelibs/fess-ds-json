@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -79,8 +80,16 @@ public class JsonSourceResolver {
     /**
      * Resolves the sources to crawl.
      *
+     * <p>
+     * Each file is returned at most once, however many of the configured roots reach it: a path
+     * named in {@code files} that also sits in a scanned directory, or two directory roots where
+     * one contains the other, would otherwise be read and indexed twice over.
+     * </p>
+     *
      * @param paramMap the data store parameters
      * @return the sources, ordered oldest first within each directory
+     * @throws DataStoreException if no source parameter is set, if {@code urls} is set, or if a
+     *             pattern parameter is not a valid regular expression
      */
     public List<JsonSource> resolve(final DataStoreParams paramMap) {
         final String files = paramMap.getAsString(FILES_PARAM);
@@ -89,10 +98,22 @@ public class JsonSourceResolver {
         if (StringUtil.isBlank(files) && StringUtil.isBlank(dirs) && StringUtil.isBlank(urls)) {
             throw new DataStoreException(FILES_PARAM + ", " + DIRS_PARAM + " and " + URLS_PARAM + " are blank.");
         }
+        if (StringUtil.isNotBlank(urls)) {
+            // Remote sources are a later phase. Until then the parameter is refused rather than
+            // accepted and ignored: ignoring it means no exception, no failure record and no
+            // documents, which is a worse answer to a configuration this resolver cannot honour
+            // than saying so.
+            throw new DataStoreException(URLS_PARAM + " is not supported yet. Use " + FILES_PARAM + " or " + DIRS_PARAM + " instead.");
+        }
 
         final String[] suffixes = getFileSuffixes(paramMap);
-        final Pattern includePattern = compile(paramMap.getAsString(INCLUDE_PATTERN_PARAM));
-        final Pattern excludePattern = compile(paramMap.getAsString(EXCLUDE_PATTERN_PARAM));
+        final Pattern includePattern = compilePattern(INCLUDE_PATTERN_PARAM, paramMap.getAsString(INCLUDE_PATTERN_PARAM));
+        final Pattern excludePattern = compilePattern(EXCLUDE_PATTERN_PARAM, paramMap.getAsString(EXCLUDE_PATTERN_PARAM));
+
+        // Both sets span the whole call rather than one root, which is what makes overlapping
+        // roots read each file once. visitedDirs additionally stops a symlink cycle; see collect.
+        final Set<String> visitedDirs = new HashSet<>();
+        final Set<String> collectedFiles = new HashSet<>();
 
         final List<JsonSource> sources = new ArrayList<>();
         if (StringUtil.isNotBlank(files)) {
@@ -105,7 +126,7 @@ public class JsonSourceResolver {
                     logger.warn("{} is not a file.", path);
                 } else if (!hasDesiredSuffix(file.getName(), suffixes)) {
                     logger.warn("{} is skipped because its suffix is not one of {}.", path, Arrays.toString(suffixes));
-                } else if (accepts(file.getAbsolutePath(), includePattern, excludePattern)) {
+                } else if (accepts(file.getAbsolutePath(), includePattern, excludePattern) && collectedFiles.add(identityOf(file))) {
                     sources.add(new FileJsonSource(file));
                 }
             }
@@ -117,21 +138,23 @@ public class JsonSourceResolver {
             final int maxDepth = getMaxDepth(paramMap);
             for (final String path : splitValues(dirs)) {
                 final File dir = new File(path);
-                if (dir.isDirectory()) {
-                    final Set<String> visited = new HashSet<>();
+                if (!dir.exists()) {
+                    logger.warn("{} does not exist.", path);
+                } else if (!dir.isDirectory()) {
+                    logger.warn("{} is not a directory.", path);
+                } else {
                     if (recursive) {
                         final String canonicalRoot = canonicalPathOrNull(dir);
-                        if (canonicalRoot == null) {
+                        if (canonicalRoot == null || !visitedDirs.add(canonicalRoot)) {
+                            // Either unresolvable, or already walked as a descendant of an
+                            // earlier root - "/a" then "/a/sub" - so there is nothing left here.
                             continue;
                         }
-                        visited.add(canonicalRoot);
                     }
                     final List<File> found = new ArrayList<>();
-                    collect(dir, suffixes, includePattern, excludePattern, recursive, maxDepth, 0, visited, found);
+                    collect(dir, suffixes, includePattern, excludePattern, recursive, maxDepth, 0, visitedDirs, collectedFiles, found);
                     found.sort(Comparator.comparingLong(File::lastModified));
                     found.forEach(f -> sources.add(new FileJsonSource(f)));
-                } else {
-                    logger.warn("{} is not a directory.", path);
                 }
             }
         }
@@ -152,12 +175,16 @@ public class JsonSourceResolver {
      * @param recursive whether to descend into subdirectories
      * @param maxDepth how far below {@code dir} recursion may go
      * @param depth the current depth
-     * @param visited canonical paths of directories already walked on this scan, used to stop
-     *            symlink cycles; empty and unused when {@code recursive} is {@code false}
+     * @param visited canonical paths of directories already walked by this resolve call, used to
+     *            stop symlink cycles and overlapping roots; unused when {@code recursive} is
+     *            {@code false}
+     * @param collected identities of files already collected by this resolve call, so that
+     *            overlapping roots do not hand the same file to the crawl twice
      * @param out collected files
      */
     private void collect(final File dir, final String[] suffixes, final Pattern includePattern, final Pattern excludePattern,
-            final boolean recursive, final int maxDepth, final int depth, final Set<String> visited, final List<File> out) {
+            final boolean recursive, final int maxDepth, final int depth, final Set<String> visited, final Set<String> collected,
+            final List<File> out) {
         final File[] entries = dir.listFiles();
         if (entries == null) {
             logger.warn("Failed to list {}.", dir.getAbsolutePath());
@@ -176,12 +203,31 @@ public class JsonSourceResolver {
                         logger.warn("Skipping {} to avoid an unbounded or duplicate walk.", entry.getAbsolutePath());
                         continue;
                     }
-                    collect(entry, suffixes, includePattern, excludePattern, recursive, maxDepth, depth + 1, visited, out);
+                    collect(entry, suffixes, includePattern, excludePattern, recursive, maxDepth, depth + 1, visited, collected, out);
                 }
-            } else if (hasDesiredSuffix(entry.getName(), suffixes) && accepts(entry.getAbsolutePath(), includePattern, excludePattern)) {
+            } else if (hasDesiredSuffix(entry.getName(), suffixes) && accepts(entry.getAbsolutePath(), includePattern, excludePattern)
+                    && collected.add(identityOf(entry))) {
                 out.add(entry);
             }
         }
+    }
+
+    /**
+     * Returns the key that identifies a file for de-duplication.
+     *
+     * <p>
+     * The canonical path is what makes two roots reaching one file compare equal even when they
+     * reach it by different names - through a symlinked directory, or through {@code ..}. When it
+     * cannot be resolved the absolute path is used instead: that is weaker, but the only cost of
+     * missing a match here is reading a file twice, which is what this already did.
+     * </p>
+     *
+     * @param file the file to identify
+     * @return its canonical path, or its absolute path when that cannot be resolved
+     */
+    private String identityOf(final File file) {
+        final String canonical = canonicalPathOrNull(file);
+        return canonical != null ? canonical : file.getAbsolutePath();
     }
 
     /**
@@ -243,8 +289,30 @@ public class JsonSourceResolver {
         }
     }
 
-    private Pattern compile(final String value) {
-        return StringUtil.isBlank(value) ? null : Pattern.compile(value.trim());
+    /**
+     * Compiles the value of a pattern parameter.
+     *
+     * <p>
+     * A value that is not a valid regular expression is reported against the parameter that
+     * carries it. Left alone, {@link Pattern#compile(String)} throws a
+     * {@link PatternSyntaxException} that names only the expression, and callers have no way to
+     * say which of the two pattern parameters produced it.
+     * </p>
+     *
+     * @param paramName the parameter the value came from
+     * @param value the value, may be {@code null} or blank
+     * @return the compiled pattern, or {@code null} when the value is blank
+     * @throws DataStoreException if the value is not a valid regular expression
+     */
+    protected static Pattern compilePattern(final String paramName, final String value) {
+        if (StringUtil.isBlank(value)) {
+            return null;
+        }
+        try {
+            return Pattern.compile(value.trim());
+        } catch (final PatternSyntaxException e) {
+            throw new DataStoreException(paramName + " is not a valid regular expression: " + value, e);
+        }
     }
 
     private boolean accepts(final String name, final Pattern includePattern, final Pattern excludePattern) {

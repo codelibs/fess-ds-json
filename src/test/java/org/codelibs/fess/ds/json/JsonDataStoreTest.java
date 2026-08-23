@@ -687,6 +687,53 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
+     * include_pattern / exclude_pattern に不正な正規表現を書いた設定ミスが、storeData から
+     * 抜ける PatternSyntaxException ではなく、当該パラメータ名を持つ失敗記録になることを
+     * 検証する。抜けるとデータ設定全体が中断され、失敗は configId:name に帰属して
+     * どのパラメータが悪いのか記録に残らない。
+     */
+    @Test
+    public void test_storeData_invalidPatternIsReportedNotThrown() throws Exception {
+        assertPatternParameterIsReported("include_pattern");
+        assertPatternParameterIsReported("exclude_pattern");
+    }
+
+    /**
+     * 不正な正規表現を持つパラメータ1つを storeData に通し、例外ではなく失敗記録1件に
+     * なることを検証する。
+     *
+     * @param patternParam 検証するパラメータ名
+     * @throws Exception 一時ファイルの操作に失敗した場合
+     */
+    private void assertPatternParameterIsReported(final String patternParam) throws Exception {
+        final Path file = Files.createTempFile("badpattern", ".jsonl");
+
+        try {
+            Files.writeString(file, "{\"url\":\"http://example.com/1\"}\n");
+            failureUrls.clear();
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            params.put(patternParam, "[unclosed");
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            // Must not throw: a bad pattern is a configuration error to report, not a crash.
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals(patternParam + ": nothing is indexed with an unusable configuration", 0, callback.getDataMapList().size());
+            assertEquals(patternParam + ": the configuration error is recorded exactly once: " + failureUrls, 1, failureUrls.size());
+            assertTrue(patternParam + ": the failure names the offending parameter: " + failureUrls,
+                    failureUrls.get(0).endsWith("JsonDataStore:" + patternParam));
+            assertTrue(patternParam + ": the failure is reported as a DataStoreException: " + failureUrls,
+                    failureUrls.get(0).startsWith("org.codelibs.fess.exception.DataStoreException @"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
      * 途中で切れて二度と同期し直せないドキュメントを、トークンストリーム経路が
      * 無限に読み続けずに打ち切り、その旨を警告に残すことを検証する。
      *
