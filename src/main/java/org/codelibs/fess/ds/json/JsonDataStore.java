@@ -191,7 +191,7 @@ public class JsonDataStore extends AbstractDataStore {
      */
     protected Pattern resolveEncryptPropertyPattern() {
         try {
-            final FessConfig fessConfig = ComponentUtil.getFessConfig();
+            final FessConfig fessConfig = fetchFessConfig();
             if (fessConfig != null) {
                 final String pattern = fessConfig.getAppEncryptPropertyPattern();
                 if (pattern != null && !pattern.isBlank()) {
@@ -206,6 +206,22 @@ public class JsonDataStore extends AbstractDataStore {
                     e);
         }
         return Pattern.compile(DEFAULT_ENCRYPT_PROPERTY_PATTERN);
+    }
+
+    /**
+     * Fetches the current FessConfig component.
+     *
+     * <p>
+     * Isolated into its own method purely as a test seam: it lets tests simulate every way
+     * {@link ComponentUtil#getFessConfig()} can fail to supply a usable FessConfig - returning
+     * {@code null}, or throwing - by overriding this one method, instead of needing a full
+     * FessConfig stub that implements the rest of that (very large) interface.
+     * </p>
+     *
+     * @return the FessConfig component, or {@code null} if none is available
+     */
+    protected FessConfig fetchFessConfig() {
+        return ComponentUtil.getFessConfig();
     }
 
     /**
@@ -224,15 +240,49 @@ public class JsonDataStore extends AbstractDataStore {
      * <p>
      * A matching key is kept present with a {@code null} value rather than dropped outright.
      * {@code convertValue} treats an absent key as "not a literal parameter reference" and falls
-     * back to evaluating the template as a script through the configured script engine - for a
-     * raw parameter name such as {@code crawler.web.auth.a.password} that is not valid script
-     * source, so instead of cleanly resolving to nothing it fails the whole record. Keeping the
-     * key present with {@code containsKey() == true} and a {@code null} value lets
-     * {@code convertValue}'s exact-match fast path apply and return {@code null} without ever
-     * reaching the script engine. It also keeps this filter from fighting the override in
+     * back to evaluating the template as a script through the configured script engine instead.
+     * That fallback does not by itself lose the record: a raw parameter name such as
+     * {@code crawler.web.auth.a.password} is valid Groovy (a property-access chain) - it fails at
+     * runtime with {@code MissingPropertyException} because nothing binds a variable named
+     * {@code crawler}, and {@code GroovyEngine#evaluate} catches exactly that, logs a WARN, and
+     * returns {@code null}. Dropping the key was rejected anyway, on grounds independent of that
+     * outcome: keeping it present-and-null never invokes the script engine for a blocked
+     * parameter at all, so blocking a field costs no script compile and no WARN per record; it
+     * does not depend on Groovy specifically, so a {@code scriptType} with no engine registered
+     * for it - as in this project's own unit tests, which register no
+     * {@link org.codelibs.fess.script.ScriptEngineFactory} - genuinely does fail the whole record
+     * on the dropped-key fallback path; and it is the only shape under which "the record is
+     * still indexed with the field simply absent" can be relied on regardless of which script
+     * engine is configured. Keeping the key present with {@code containsKey() == true} and a
+     * {@code null} value instead lets {@code convertValue}'s exact-match fast path apply and
+     * return {@code null} directly. It also keeps this filter from fighting the override in
      * {@link #processSource}: a record field of the same name still replaces this {@code null}
      * afterwards, so record data keeps taking priority over a blocked parameter exactly as it
      * does over a visible one.
+     * </p>
+     *
+     * <p>
+     * A script that reaches a blocked parameter only through the script engine - for example by
+     * concatenating it, as in {@code "'[' + access_token + ']'"} - still cannot recover the
+     * secret, but the field does not simply come out empty either: Groovy's {@code +} stringifies
+     * a {@code null} operand, so the result is the literal text {@code "[null]"}, not
+     * {@code "[]"} and not an error. Whatever field a script builds that way indexes that literal
+     * text.
+     * </p>
+     *
+     * <p>
+     * One key currently matches this pattern by coincidence, not by design:
+     * {@link Constants#CRAWLER_STATS_KEY} ({@code "crawler.stats.key"}) ends in "key", so the
+     * per-record {@link StatsKeyObject} that {@link #processSource} stores into {@code paramMap}
+     * is filtered out of the script scope too. This map is built once per source, before that
+     * source's record loop starts, while {@code paramMap} itself is mutated inside the loop - so
+     * the key is simply absent (not merely {@code null}) for a source's first record, and
+     * present-and-{@code null} with the <em>previous</em> source's stale {@code StatsKeyObject}
+     * for every source read after the first. Nothing currently reads this key from a script, so
+     * this has no observed effect, but it is not intentional filtering: if this constant's
+     * spelling ever changes so it no longer matches {@code encryptPropertyPattern}, a script
+     * would start seeing a stale {@code StatsKeyObject} from the previous source - so treat a
+     * rename of that constant as a reason to re-examine this.
      * </p>
      *
      * @param paramMap the data store parameters

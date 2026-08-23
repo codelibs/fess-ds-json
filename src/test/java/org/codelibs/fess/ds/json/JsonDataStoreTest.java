@@ -27,6 +27,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
@@ -41,9 +42,12 @@ import org.codelibs.fess.exception.DataStoreCrawlingException;
 import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.helper.CrawlerStatsHelper;
 import org.codelibs.fess.helper.SystemHelper;
+import org.codelibs.fess.mylasta.direction.FessConfig;
 import org.codelibs.fess.opensearch.config.exentity.CrawlingConfig;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.opensearch.config.exentity.FailureUrl;
+import org.codelibs.fess.script.ScriptEngineFactory;
+import org.codelibs.fess.script.groovy.GroovyEngine;
 import org.codelibs.fess.util.ComponentUtil;
 
 /**
@@ -99,6 +103,14 @@ public class JsonDataStoreTest extends UnitDsTestCase {
                 return null;
             }
         }, FailureUrlService.class.getCanonicalName());
+
+        // 実際の GroovyEngine を登録する。scriptMap のテンプレートが resultMap の完全一致キーで
+        // ないとき（例: 連結式）、AbstractDataStore#convertValue がここを経由する。DI コンテナ経由
+        // ではなく直接 new するため @PostConstruct init() は呼ばれないが、evaluate() が必要とする
+        // スクリプトキャッシュはコンストラクタの buildScriptCache() だけで揃う。
+        final ScriptEngineFactory scriptEngineFactory = new ScriptEngineFactory();
+        scriptEngineFactory.add(Constants.DEFAULT_SCRIPT, new GroovyEngine());
+        ComponentUtil.register(scriptEngineFactory, "scriptEngineFactory");
     }
 
     @Override
@@ -173,6 +185,19 @@ public class JsonDataStoreTest extends UnitDsTestCase {
 
         final DataStoreParams params = new DataStoreParams();
         params.put("fileEncoding", "Shift_JIS");
+
+        final String encoding = invokeMethod(dataStore, "getFileEncoding", params);
+
+        assertEquals("Shift_JIS", encoding);
+    }
+
+    /**
+     * 新名 file_encoding が素直に効くことを検証する（旧名だけを試すテストの裏返し）。
+     */
+    @Test
+    public void test_getFileEncoding_canonicalSnakeCaseKey() throws Exception {
+        final DataStoreParams params = new DataStoreParams();
+        params.put("file_encoding", "Shift_JIS");
 
         final String encoding = invokeMethod(dataStore, "getFileEncoding", params);
 
@@ -941,6 +966,159 @@ public class JsonDataStoreTest extends UnitDsTestCase {
         } finally {
             Files.deleteIfExists(file);
         }
+    }
+
+    /**
+     * 完全一致ではなくスクリプトエンジン経由（連結式）で機微パラメータに触れても、
+     * 秘密の値自体は取り出せないことを検証する。GroovyEngine は null オペランドを
+     * 文字列化するため、結果は空文字ではなく "[null]" になる。
+     */
+    @Test
+    public void test_storeData_scriptConcatenationOfFilteredParameterYieldsNullString() throws Exception {
+        final Path file = Files.createTempFile("secret", ".jsonl");
+        Files.writeString(file, "{\"url\":\"http://example.com/1\"}\n");
+
+        try {
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            params.put("access_token", "t0ken");
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+            // Not an exact-match template, so convertValue falls through to the real
+            // GroovyEngine registered in setUp() instead of the containsKey fast path.
+            scriptMap.put("wrapped_token", "'[' + access_token + ']'");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals(1, callback.getDataMapList().size());
+            final Object wrapped = callback.getDataMapList().get(0).get("wrapped_token");
+            assertEquals("[null]", wrapped);
+            assertFalse("the secret must not leak through concatenation either", wrapped != null && wrapped.toString().contains("t0ken"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * レコード側のフィールドが、フィルタ済みパラメータと同名であっても優先されることを検証する。
+     */
+    @Test
+    public void test_storeData_recordFieldOverridesFilteredParameter() throws Exception {
+        final Path file = Files.createTempFile("secret", ".jsonl");
+        Files.writeString(file, "{\"url\":\"http://example.com/1\",\"access_token\":\"record-value\"}\n");
+
+        try {
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            params.put("access_token", "t0ken");
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+            scriptMap.put("token_field", "access_token");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals(1, callback.getDataMapList().size());
+            assertEquals("record-value", callback.getDataMapList().get(0).get("token_field"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * {@link ComponentUtil#getFessConfig()} が {@code null} を返す場合でも、
+     * フィルタリングが既定パターンへフォールバックして継続することを検証する。
+     */
+    @Test
+    public void test_resolveEncryptPropertyPattern_nullConfigFallsBackToDefault() throws Exception {
+        final JsonDataStore store = new JsonDataStore() {
+            @Override
+            protected FessConfig fetchFessConfig() {
+                return null;
+            }
+        };
+
+        final Pattern pattern = store.resolveEncryptPropertyPattern();
+
+        assertTrue("a sensitive key must still be recognized", pattern.matcher("crawler.web.auth.a.password").matches());
+        assertFalse("a non-sensitive key must not be blanked", pattern.matcher("files").matches());
+    }
+
+    /**
+     * 設定されたパターンが空文字の場合でも、フィルタリングが既定パターンへ
+     * フォールバックして継続することを検証する。
+     */
+    @Test
+    public void test_resolveEncryptPropertyPattern_blankPatternFallsBackToDefault() throws Exception {
+        final JsonDataStore store = new JsonDataStore() {
+            @Override
+            protected FessConfig fetchFessConfig() {
+                return fessConfigReturningPattern("   ");
+            }
+        };
+
+        final Pattern pattern = store.resolveEncryptPropertyPattern();
+
+        assertTrue("a sensitive key must still be recognized", pattern.matcher("crawler.web.auth.a.password").matches());
+        assertFalse("a non-sensitive key must not be blanked", pattern.matcher("files").matches());
+    }
+
+    /**
+     * 設定されたパターンが不正な正規表現（Pattern.compile が PatternSyntaxException を投げる）の
+     * 場合でも、フィルタリングが既定パターンへフォールバックして継続することを検証する。
+     */
+    @Test
+    public void test_resolveEncryptPropertyPattern_malformedPatternFallsBackToDefault() throws Exception {
+        final JsonDataStore store = new JsonDataStore() {
+            @Override
+            protected FessConfig fetchFessConfig() {
+                return fessConfigReturningPattern("[unclosed");
+            }
+        };
+
+        final Pattern pattern = store.resolveEncryptPropertyPattern();
+
+        assertTrue("a sensitive key must still be recognized", pattern.matcher("crawler.web.auth.a.password").matches());
+        assertFalse("a non-sensitive key must not be blanked", pattern.matcher("files").matches());
+    }
+
+    /**
+     * FessConfig へのアクセス自体が例外を投げる場合でも、フィルタリングが既定パターンへ
+     * フォールバックして継続することを検証する。
+     */
+    @Test
+    public void test_resolveEncryptPropertyPattern_configAccessorThrowsFallsBackToDefault() throws Exception {
+        final JsonDataStore store = new JsonDataStore() {
+            @Override
+            protected FessConfig fetchFessConfig() {
+                throw new IllegalStateException("simulated: FessConfig component not available");
+            }
+        };
+
+        final Pattern pattern = store.resolveEncryptPropertyPattern();
+
+        assertTrue("a sensitive key must still be recognized", pattern.matcher("crawler.web.auth.a.password").matches());
+        assertFalse("a non-sensitive key must not be blanked", pattern.matcher("files").matches());
+    }
+
+    /**
+     * {@link FessConfig#getAppEncryptPropertyPattern()} だけが呼ばれる想定の、最小限の
+     * {@link FessConfig} スタブを作る。フル実装（数百メソッド）を用意する代わりに、
+     * 呼ばれた場合にのみ値を返す動的プロキシを使う。
+     *
+     * @param pattern {@link FessConfig#getAppEncryptPropertyPattern()} が返す値
+     * @return 指定した値だけを返す {@link FessConfig}
+     */
+    private static FessConfig fessConfigReturningPattern(final String pattern) {
+        return (FessConfig) java.lang.reflect.Proxy.newProxyInstance(FessConfig.class.getClassLoader(), new Class<?>[] { FessConfig.class },
+                (proxy, method, args) -> {
+                    if ("getAppEncryptPropertyPattern".equals(method.getName())) {
+                        return pattern;
+                    }
+                    throw new UnsupportedOperationException(
+                            "This stub only implements getAppEncryptPropertyPattern(); called: " + method.getName());
+                });
     }
 
     /**
