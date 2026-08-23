@@ -166,6 +166,15 @@ public class JsonDataStore extends AbstractDataStore {
                 return;
             }
         }
+        // And the same for urls, which this phase cannot honour at all. Letting the resolver's
+        // exception escape would file the failure against configId:name, which is precisely the
+        // attribution these checks exist to fix.
+        try {
+            JsonSourceResolver.rejectUnsupportedUrls(paramMap.getAsString(JsonSourceResolver.URLS_PARAM));
+        } catch (final DataStoreException e) {
+            recordParameterFailure(dataConfig, JsonSourceResolver.URLS_PARAM, e);
+            return;
+        }
         final String rootPath = paramMap.getAsString(ROOT_PATH_PARAM);
         if (StringUtil.isNotBlank(rootPath) && format == JsonRecordReader.Format.JSONL) {
             // Not an error, and not worth abandoning the crawl over, but the two parameters

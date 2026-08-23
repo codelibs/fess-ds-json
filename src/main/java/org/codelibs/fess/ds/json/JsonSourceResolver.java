@@ -98,13 +98,7 @@ public class JsonSourceResolver {
         if (StringUtil.isBlank(files) && StringUtil.isBlank(dirs) && StringUtil.isBlank(urls)) {
             throw new DataStoreException(FILES_PARAM + ", " + DIRS_PARAM + " and " + URLS_PARAM + " are blank.");
         }
-        if (StringUtil.isNotBlank(urls)) {
-            // Remote sources are a later phase. Until then the parameter is refused rather than
-            // accepted and ignored: ignoring it means no exception, no failure record and no
-            // documents, which is a worse answer to a configuration this resolver cannot honour
-            // than saying so.
-            throw new DataStoreException(URLS_PARAM + " is not supported yet. Use " + FILES_PARAM + " or " + DIRS_PARAM + " instead.");
-        }
+        rejectUnsupportedUrls(urls);
 
         final String[] suffixes = getFileSuffixes(paramMap);
         final Pattern includePattern = compilePattern(INCLUDE_PATTERN_PARAM, paramMap.getAsString(INCLUDE_PATTERN_PARAM));
@@ -286,6 +280,26 @@ public class JsonSourceResolver {
         } catch (final NumberFormatException e) {
             logger.warn("{} is not an int value: {}. Using {}.", MAX_DEPTH_PARAM, value, DEFAULT_MAX_DEPTH, e);
             return DEFAULT_MAX_DEPTH;
+        }
+    }
+
+    /**
+     * Refuses the {@code urls} parameter until remote sources are implemented.
+     *
+     * <p>
+     * Remote sources are a later phase. Until then the parameter is refused rather than accepted
+     * and ignored: ignoring it means no exception, no failure record and no documents, which is a
+     * worse answer to a configuration this resolver cannot honour than saying so. Exposed
+     * separately from {@link #resolve(DataStoreParams)} so that a caller can make the same check
+     * early and attribute the failure to this parameter rather than to the data config.
+     * </p>
+     *
+     * @param value the parameter value, may be {@code null} or blank
+     * @throws DataStoreException if the value is not blank
+     */
+    protected static void rejectUnsupportedUrls(final String value) {
+        if (StringUtil.isNotBlank(value)) {
+            throw new DataStoreException(URLS_PARAM + " is not supported yet. Use " + FILES_PARAM + " or " + DIRS_PARAM + " instead.");
         }
     }
 

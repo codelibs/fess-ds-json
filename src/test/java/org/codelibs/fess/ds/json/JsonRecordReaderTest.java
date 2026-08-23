@@ -236,18 +236,50 @@ public class JsonRecordReaderTest {
     }
 
     /**
-     * A complete object indented onto its own line is a fragment of a record, not a record: the
-     * last element of a nested array is written exactly that way, with no comma after it, so
-     * strictness alone would accept it. Requiring the line to start at column zero rules it out.
+     * Indentation must not disqualify a line from settling the format. A JSON Lines file whose
+     * records are indented is still a JSON Lines file, and the merge base read one correctly.
      */
     @Test
-    public void test_auto_indentedCompleteObjectIsNotARecord() throws IOException {
+    public void test_auto_indentedRecordsAreStillJsonLines() throws IOException {
+        assertTrue(isLineOriented("  garbage\n  {\"a\":1}\n  {\"a\":2}\n"), "space-indented records below a bad line are JSON Lines");
+        assertTrue(isLineOriented("\tgarbage\n\t{\"a\":1}\n\t{\"a\":2}\n"), "tab-indented records below a bad line are too");
+
+        final List<Object> outcomes = readOutcomes("  garbage\n  {\"a\":1}\n  {\"a\":2}\n", Format.AUTO, null);
+        assertEquals(3, outcomes.size(), "one outcome per non-blank line: " + outcomes);
+        assertTrue(outcomes.get(0) instanceof DataStoreException, "only the bad line fails: " + outcomes.get(0));
+        assertEquals(1, ((Map<?, ?>) outcomes.get(1)).get("a"));
+        assertEquals(2, ((Map<?, ?>) outcomes.get(2)).get("a"));
+    }
+
+    /**
+     * The price of that: a wrapper object whose array elements are minified one per line offers a
+     * line that strict parsing accepts - the last element, which has no comma after it - so the
+     * document is read line by line rather than as one record.
+     *
+     * <p>
+     * This is asserted rather than avoided. It is what the merge base did with the same document,
+     * because that release read every document line by line unconditionally, and the rule that
+     * would avoid it - requiring a candidate line to start at column zero - costs indented JSON
+     * Lines, which is a real format carrying real records. Reading this document as one record is
+     * only useful with {@code rootPath}, and {@code rootPath} skips the look-ahead entirely.
+     * </p>
+     */
+    @Test
+    public void test_auto_prettyPrintedWrapperWithoutRootPathIsReadLineByLine() throws IOException {
         final String json = "{\n  \"items\": [\n    {\"a\":1},\n    {\"a\":2}\n  ]\n}\n";
 
-        assertFalse(isLineOriented(json), "a wrapper object holding minified array elements is not line-delimited");
-        final List<Map<String, Object>> records = readAll(json);
-        assertEquals(1, records.size(), "the whole wrapper is one record: " + records);
-        assertTrue(records.get(0).get("items") instanceof List, "the nested array survives: " + records.get(0));
+        assertTrue(isLineOriented(json), "the minified last element makes this look line-delimited");
+        final List<Object> outcomes = readOutcomes(json, Format.AUTO, null);
+        assertEquals(6, outcomes.size(), "one outcome per non-blank line: " + outcomes);
+        assertEquals(1, ((Map<?, ?>) outcomes.get(2)).get("a"), "the array elements come out as records");
+        assertEquals(2, ((Map<?, ?>) outcomes.get(3)).get("a"));
+        assertEquals(4, outcomes.stream().filter(o -> o instanceof DataStoreException).count(),
+                "and the four structural lines are loud failures: " + outcomes);
+
+        // With rootPath - the configuration this document is actually for - it reads correctly.
+        final List<Map<String, Object>> nested = readAll(json, Format.AUTO, "/items");
+        assertEquals(2, nested.size(), "rootPath skips the look-ahead and reads the nested array: " + nested);
+        assertEquals(1, nested.get(0).get("a"));
     }
 
     /**

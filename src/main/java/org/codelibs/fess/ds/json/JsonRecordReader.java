@@ -312,6 +312,20 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
      * </p>
      *
      * <p>
+     * That asymmetry is the whole of the defence, and it is deliberately not reinforced with a
+     * test on where the line starts. One shape slips past it: a wrapper object holding an array
+     * whose last element is minified onto its own line offers the line {@code {"a":2}}, a
+     * complete object with nothing after it, so such a document is read line by line and comes
+     * out as its array elements plus a failure for every other line. That is exactly what the
+     * previous release did with it, since that release read every document line by line
+     * unconditionally, and the alternative costs more than it buys: any rule that rejects the
+     * indented fragment also rejects an indented JSON Lines record, which loses real records that
+     * the previous release indexed. The configuration that actually wants this document is
+     * {@code root_path}, which skips this look-ahead entirely; without one it yields a single
+     * document whose fields are all nested out of reach.
+     * </p>
+     *
+     * <p>
      * Reaching the limit without the line ending is itself an answer: a document with no line
      * break in its first 64K is a minified document or one enormous record, and the token stream
      * reads both without buffering.
@@ -367,33 +381,11 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
             if (nextLine == null) {
                 return false;
             }
-            if (startsAtColumnZero(nextLine) && parsesAsCompleteObject(nextLine, true)) {
+            if (parsesAsCompleteObject(nextLine, true)) {
                 return true;
             }
         }
         return false;
-    }
-
-    /**
-     * Reports whether a line begins with its own first character rather than with indentation.
-     *
-     * <p>
-     * This is the second half of what keeps the look-ahead from tearing up a document that is not
-     * line-delimited. Strictness alone is not enough: a wrapper object holding an array whose last
-     * element is minified onto its own line, as in {@code {\n"items": [\n{"a":1},\n{"a":2}\n]\n}},
-     * offers the line {@code {"a":2}} - a complete object with nothing after it - even though it
-     * is a fragment of one record, not a record. Every such fragment is indented by the printer
-     * that produced it, whereas a JSON Lines record starts at the left margin, so requiring column
-     * zero rules the fragment out. Only the recovery scan applies this: the first line is checked
-     * leniently and unconditionally, so a JSON Lines file that does indent its records is still
-     * recognised from that line.
-     * </p>
-     *
-     * @param line the line to test
-     * @return {@code true} if the line's first character is not whitespace
-     */
-    private static boolean startsAtColumnZero(final String line) {
-        return !line.isEmpty() && !Character.isWhitespace(line.charAt(0));
     }
 
     /**

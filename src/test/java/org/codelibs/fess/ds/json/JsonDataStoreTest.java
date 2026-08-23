@@ -66,6 +66,15 @@ import org.codelibs.fess.util.ComponentUtil;
  * pipeline (including error recording) rather than mocking or catching exceptions.
  */
 public class JsonDataStoreTest extends UnitDsTestCase {
+
+    /**
+     * A pretty-printed object wrapping an array of records, the shape whose AUTO handling the
+     * column-zero question turned on. Shared by the root_path test and the without-root_path
+     * test so both are demonstrably talking about the same document.
+     */
+    private static final String PRETTY_WRAPPER = "{\n  \"meta\": 1,\n  \"items\": [\n    {\"url\":\"http://example.com/1\"},\n"
+            + "    {\"url\":\"http://example.com/2\"}\n  ]\n}\n";
+
     public JsonDataStore dataStore;
 
     /** FailureUrlService に記録された失敗を "<errorName> @ <url>" 形式で保持する。 */
@@ -734,6 +743,29 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
+     * まだ実装されていない urls パラメータが、storeData から抜ける例外ではなく、
+     * 当該パラメータ名を持つ失敗記録になることを検証する。抜けるとデータ設定全体が
+     * 中断され、失敗は configId:name に帰属して、どのパラメータが原因か記録に残らない。
+     */
+    @Test
+    public void test_storeData_urlsIsReportedNotThrown() throws Exception {
+        final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+        final DataStoreParams params = new DataStoreParams();
+        params.put("urls", "http://example.com/a.json");
+        final Map<String, String> scriptMap = new HashMap<>();
+        scriptMap.put("url", "url");
+
+        // Must not throw: an unsupported parameter is a configuration error to report.
+        dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+        assertEquals("nothing is indexed", 0, callback.getDataMapList().size());
+        assertEquals("the configuration error is recorded exactly once: " + failureUrls, 1, failureUrls.size());
+        assertTrue("the failure names the offending parameter: " + failureUrls, failureUrls.get(0).endsWith("JsonDataStore:urls"));
+        assertTrue("the failure is reported as a DataStoreException: " + failureUrls,
+                failureUrls.get(0).startsWith("org.codelibs.fess.exception.DataStoreException @"));
+    }
+
+    /**
      * 途中で切れて二度と同期し直せないドキュメントを、トークンストリーム経路が
      * 無限に読み続けずに打ち切り、その旨を警告に残すことを検証する。
      *
@@ -1082,6 +1114,117 @@ public class JsonDataStoreTest extends UnitDsTestCase {
 
             assertEquals("both array elements are stored", 2, callback.getDataMapList().size());
             assertEquals("no failures: " + failureUrls, 0, failureUrls.size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * 行頭に空白がある JSONL でも、壊れた1行目のあとの正常な行が登録されることを検証する。
+     * マージ元 (1aaa07a) は無条件に行単位で読んでいたためこの形を 2件登録しており、
+     * 先読みが「行頭が空白でない行だけを記録とみなす」と、インデントされた JSONL が
+     * まるごとトークンストリームに落ちてソースが消える。空白インデントとタブインデントの
+     * 両方を固定する。
+     */
+    @Test
+    public void test_storeData_indentedJsonLinesWithMalformedFirstLine() throws Exception {
+        assertIndentedJsonLines("space-indented", "  ");
+        assertIndentedJsonLines("tab-indented", "\t");
+    }
+
+    /**
+     * インデントされた JSONL を storeData に通し、1行目の失敗1件と後続2件の登録を確認する。
+     *
+     * @param shape 失敗時のメッセージに使う形の名前
+     * @param indent 各行の先頭に付ける空白
+     * @throws Exception 一時ファイルの操作に失敗した場合
+     */
+    private void assertIndentedJsonLines(final String shape, final String indent) throws Exception {
+        final Path file = Files.createTempFile("indented", ".jsonl");
+
+        try {
+            Files.writeString(file, indent + "garbage\n" + indent + "{\"url\":\"http://example.com/1\"}\n" + indent
+                    + "{\"url\":\"http://example.com/2\"}\n");
+            failureUrls.clear();
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals(shape + ": both indented records are stored: " + callback.getDataMapList(), 2, callback.getDataMapList().size());
+            assertEquals("http://example.com/1", callback.getDataMapList().get(0).get("url"));
+            assertEquals("http://example.com/2", callback.getDataMapList().get(1).get("url"));
+            assertEquals(shape + ": only the malformed first line fails: " + failureUrls, 1, failureUrls.size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * 整形済みラッパーオブジェクトを root_path 付きで読んだとき、ネストした配列が正しく
+     * 取り出せることを検証する。これがこの形の唯一の実用的な設定であり、AUTO 判定を
+     * どう変えてもここは影響を受けてはならない (root_path は先読み自体を飛ばす)。
+     */
+    @Test
+    public void test_storeData_rootPathOnPrettyPrintedWrapper() throws Exception {
+        final Path file = Files.createTempFile("prettywrapper", ".json");
+
+        try {
+            Files.writeString(file, PRETTY_WRAPPER);
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            params.put("root_path", "/items");
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("both nested records are stored: " + callback.getDataMapList(), 2, callback.getDataMapList().size());
+            assertEquals("http://example.com/1", callback.getDataMapList().get(0).get("url"));
+            assertEquals("http://example.com/2", callback.getDataMapList().get(1).get("url"));
+            assertEquals("no failures: " + failureUrls, 0, failureUrls.size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * 同じラッパーを root_path なしで読んだときに何が起きるかを明示的に固定する。
+     *
+     * <p>
+     * これは AUTO 判定の代償そのものである。整形済みラッパーは行単位に切り刻まれ、
+     * 中の配列要素2件が登録され、残り5行が失敗として記録される。マージ元 (1aaa07a) は
+     * 無条件に行単位で読んでいたので、まったく同じ結果になる。root_path なしでこの形を
+     * 1レコードとして読む方が良く見えるが、それは url が null の文書1件にしかならない。
+     * 代償を明示的に書き出しておくことで、この判断を暗黙に覆せないようにする。
+     * </p>
+     */
+    @Test
+    public void test_storeData_prettyPrintedWrapperWithoutRootPathIsReadLineByLine() throws Exception {
+        final Path file = Files.createTempFile("prettywrappernoroot", ".json");
+
+        try {
+            Files.writeString(file, PRETTY_WRAPPER);
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("the two array element lines are stored as records: " + callback.getDataMapList(), 2,
+                    callback.getDataMapList().size());
+            assertEquals("http://example.com/1", callback.getDataMapList().get(0).get("url"));
+            assertEquals("http://example.com/2", callback.getDataMapList().get(1).get("url"));
+            assertEquals("the other five lines are recorded as failures, exactly as 1aaa07a did: " + failureUrls, 5, failureUrls.size());
         } finally {
             Files.deleteIfExists(file);
         }
