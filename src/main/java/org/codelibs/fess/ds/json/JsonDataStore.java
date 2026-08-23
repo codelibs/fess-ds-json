@@ -21,6 +21,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -36,6 +37,7 @@ import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.helper.CrawlerStatsHelper;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsAction;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsKeyObject;
+import org.codelibs.fess.mylasta.direction.FessConfig;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.util.ComponentUtil;
 
@@ -54,7 +56,7 @@ import org.codelibs.fess.util.ComponentUtil;
  * <ul>
  * <li>files - Comma-separated list of file paths to process</li>
  * <li>directories - Comma-separated list of directory paths to scan</li>
- * <li>fileEncoding - Character encoding for files (default: UTF-8)</li>
+ * <li>file_encoding - Character encoding for files (default: UTF-8)</li>
  * <li>format - Document shape: auto, jsonl or json (default: auto)</li>
  * <li>root_path - JSON Pointer selecting a nested array to read records from</li>
  * </ul>
@@ -62,7 +64,22 @@ import org.codelibs.fess.util.ComponentUtil;
 public class JsonDataStore extends AbstractDataStore {
     private static final Logger logger = LogManager.getLogger(JsonDataStore.class);
 
-    private static final String FILE_ENCODING_PARAM = "fileEncoding";
+    /**
+     * Fallback used when the configured encrypt-property pattern cannot be obtained from
+     * {@link org.codelibs.fess.mylasta.direction.FessConfig}, matching the documented default
+     * for {@code app.encrypt.property.pattern} in {@code fess_config.properties}.
+     */
+    protected static final String DEFAULT_ENCRYPT_PROPERTY_PATTERN = ".*password|.*key|.*token|.*secret";
+
+    /**
+     * Character encoding of the sources.
+     *
+     * <p>
+     * The old camelCase spelling {@code fileEncoding} keeps working: DataStoreParams
+     * resolves camelCase and snake_case keys to each other.
+     * </p>
+     */
+    protected static final String FILE_ENCODING_PARAM = "file_encoding";
 
     /** Document shape: auto, jsonl or json. */
     protected static final String FORMAT_PARAM = "format";
@@ -107,6 +124,10 @@ public class JsonDataStore extends AbstractDataStore {
     protected void storeData(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap) {
         final String fileEncoding = getFileEncoding(paramMap);
+        // Compiled once for the whole crawl, not once per record: a Pattern is looked up and
+        // compiled from FessConfig here, then reused by createScriptParamMap for every source
+        // and every record processSource reads.
+        final Pattern encryptPropertyPattern = resolveEncryptPropertyPattern();
         final JsonRecordReader.Format format;
         try {
             // Resolved here, once for the whole crawl rather than once per source, and inside
@@ -133,7 +154,8 @@ public class JsonDataStore extends AbstractDataStore {
                 logger.info("Stopped crawling: {}", source.getName());
                 break;
             }
-            if (!processSource(dataConfig, callback, paramMap, scriptMap, defaultDataMap, source, fileEncoding, format, rootPath)) {
+            if (!processSource(dataConfig, callback, paramMap, scriptMap, defaultDataMap, source, fileEncoding, format, rootPath,
+                    encryptPropertyPattern)) {
                 // The data store was asked to abort on this record; stop reading further sources.
                 break;
             }
@@ -154,6 +176,79 @@ public class JsonDataStore extends AbstractDataStore {
     }
 
     /**
+     * Resolves the pattern used to keep sensitive data store parameters out of the script
+     * scope, from {@code app.encrypt.property.pattern}.
+     *
+     * <p>
+     * This is a security filter, not a convenience default: if {@link ComponentUtil#getFessConfig()}
+     * is unavailable for any reason - it returns {@code null}, the configured pattern is blank, or
+     * the lookup itself throws (missing container, unbound component, ...) - this falls back to
+     * {@link #DEFAULT_ENCRYPT_PROPERTY_PATTERN} rather than skip filtering. Failing open here would
+     * be worse than failing closed.
+     * </p>
+     *
+     * @return the compiled encrypt-property pattern
+     */
+    protected Pattern resolveEncryptPropertyPattern() {
+        try {
+            final FessConfig fessConfig = ComponentUtil.getFessConfig();
+            if (fessConfig != null) {
+                final String pattern = fessConfig.getAppEncryptPropertyPattern();
+                if (pattern != null && !pattern.isBlank()) {
+                    return Pattern.compile(pattern);
+                }
+            }
+        } catch (final RuntimeException e) {
+            // Covers a missing/unbound FessConfig component as well as a malformed configured
+            // pattern (PatternSyntaxException extends RuntimeException) - either way, fall back
+            // below instead of leaving sensitive parameters unfiltered.
+            logger.warn("Failed to resolve the {} pattern; falling back to the default pattern.", FessConfig.APP_ENCRYPT_PROPERTY_PATTERN,
+                    e);
+        }
+        return Pattern.compile(DEFAULT_ENCRYPT_PROPERTY_PATTERN);
+    }
+
+    /**
+     * Builds the parameter map exposed to the field scripts, with sensitive values removed.
+     *
+     * <p>
+     * Data store parameters are visible to scripts as top-level variables. Fess decrypts
+     * parameters matching {@code app.encrypt.property.pattern} before handing them to the
+     * plugin, so passing them through unchanged would let a script line such as
+     * {@code leaked=crawler.web.auth.a.password} copy a credential straight into an indexed
+     * field via {@code AbstractDataStore#convertValue}'s exact-key shortcut - no script engine
+     * involved. Scripts are not sandboxed, so the filtering happens here, before the scope a
+     * script can read is ever built.
+     * </p>
+     *
+     * <p>
+     * A matching key is kept present with a {@code null} value rather than dropped outright.
+     * {@code convertValue} treats an absent key as "not a literal parameter reference" and falls
+     * back to evaluating the template as a script through the configured script engine - for a
+     * raw parameter name such as {@code crawler.web.auth.a.password} that is not valid script
+     * source, so instead of cleanly resolving to nothing it fails the whole record. Keeping the
+     * key present with {@code containsKey() == true} and a {@code null} value lets
+     * {@code convertValue}'s exact-match fast path apply and return {@code null} without ever
+     * reaching the script engine. It also keeps this filter from fighting the override in
+     * {@link #processSource}: a record field of the same name still replaces this {@code null}
+     * afterwards, so record data keeps taking priority over a blocked parameter exactly as it
+     * does over a visible one.
+     * </p>
+     *
+     * @param paramMap the data store parameters
+     * @param encryptPropertyPattern the pattern identifying sensitive parameter keys
+     * @return the parameters a script may read, with sensitive values replaced by {@code null}
+     */
+    protected Map<String, Object> createScriptParamMap(final DataStoreParams paramMap, final Pattern encryptPropertyPattern) {
+        final Map<String, Object> scriptParamMap = new LinkedHashMap<>();
+        for (final Map.Entry<String, Object> entry : paramMap.asMap().entrySet()) {
+            final String key = entry.getKey();
+            scriptParamMap.put(key, encryptPropertyPattern.matcher(key).matches() ? null : entry.getValue());
+        }
+        return scriptParamMap;
+    }
+
+    /**
      * Reads one source and stores each of its records.
      *
      * @param dataConfig the data configuration being crawled
@@ -165,14 +260,21 @@ public class JsonDataStore extends AbstractDataStore {
      * @param fileEncoding the character encoding
      * @param format the document shape, already resolved from the parameters
      * @param rootPath a JSON Pointer selecting a nested array, may be {@code null}
+     * @param encryptPropertyPattern the pattern identifying sensitive parameter keys, resolved once
+     *            for the whole {@code storeData} call
      * @return {@code false} if crawling must stop, {@code true} to continue with the next source
      */
     protected boolean processSource(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap, final JsonSource source,
-            final String fileEncoding, final JsonRecordReader.Format format, final String rootPath) {
+            final String fileEncoding, final JsonRecordReader.Format format, final String rootPath, final Pattern encryptPropertyPattern) {
         final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
         final String scriptType = getScriptType(paramMap);
         final long readInterval = getReadInterval(paramMap);
+        // Built once for this source rather than once per record: resultMap.putAll(record) below
+        // creates a fresh copy per record from this shared base, so a script's exact-key lookup
+        // (AbstractDataStore#convertValue) never touches a parameter matching
+        // encryptPropertyPattern. See createScriptParamMap's javadoc for why that matters.
+        final Map<String, Object> scriptParamMap = createScriptParamMap(paramMap, encryptPropertyPattern);
         boolean aborted = false;
 
         logger.info("Loading {}", source.getName());
@@ -232,7 +334,7 @@ public class JsonDataStore extends AbstractDataStore {
                     if (readFailure != null) {
                         throw readFailure;
                     }
-                    final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap.asMap());
+                    final Map<String, Object> resultMap = new LinkedHashMap<>(scriptParamMap);
                     resultMap.putAll(record);
 
                     crawlerStatsHelper.record(statsKey, StatsAction.PREPARED);

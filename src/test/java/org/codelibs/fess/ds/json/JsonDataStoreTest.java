@@ -160,6 +160,26 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
+     * 旧名 fileEncoding が引き続き効くことを検証する（ParamMap の自動変換による）。
+     * あわせて、内部パラメータ名が file_encoding に改名されたことを確認する
+     * （ParamMap はどちらの綴りで問い合わせても同じ値を返すため、改名自体は
+     * この reflection によるチェックでしか黒箱的に検証できない）。
+     */
+    @Test
+    public void test_getFileEncoding_legacyCamelCaseKey() throws Exception {
+        final java.lang.reflect.Field field = JsonDataStore.class.getDeclaredField("FILE_ENCODING_PARAM");
+        field.setAccessible(true);
+        assertEquals("the parameter is renamed to snake_case", "file_encoding", field.get(null));
+
+        final DataStoreParams params = new DataStoreParams();
+        params.put("fileEncoding", "Shift_JIS");
+
+        final String encoding = invokeMethod(dataStore, "getFileEncoding", params);
+
+        assertEquals("Shift_JIS", encoding);
+    }
+
+    /**
      * Test storeData with empty file list.
      */
     @Test
@@ -892,6 +912,38 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
+     * 機微パラメータがスクリプトから読めないことを検証する。
+     */
+    @Test
+    public void test_storeData_doesNotExposeSecretsToScript() throws Exception {
+        final Path file = Files.createTempFile("secret", ".jsonl");
+        Files.writeString(file, "{\"url\":\"http://example.com/1\"}\n");
+
+        try {
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            params.put("crawler.web.auth.a.password", "s3cr3t");
+            params.put("access_token", "t0ken");
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+            scriptMap.put("leaked_password", "crawler.web.auth.a.password");
+            scriptMap.put("leaked_token", "access_token");
+            scriptMap.put("visible_files", "files");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals(1, callback.getDataMapList().size());
+            final Map<String, Object> dataMap = callback.getDataMapList().get(0);
+            assertNull("the password must not reach the document", dataMap.get("leaked_password"));
+            assertNull("the token must not reach the document", dataMap.get("leaked_token"));
+            assertNotNull("non-sensitive parameters stay visible", dataMap.get("visible_files"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
      * Runs {@code action} with an appender attached to {@link JsonDataStore}'s logger and
      * returns the messages it logged.
      *
@@ -1022,4 +1074,5 @@ public class JsonDataStoreTest extends UnitDsTestCase {
             return dataMapList;
         }
     }
+
 }
