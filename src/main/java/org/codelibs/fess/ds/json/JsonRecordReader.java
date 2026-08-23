@@ -74,13 +74,21 @@ import com.fasterxml.jackson.databind.RuntimeJsonMappingException;
  *
  * <p>
  * Two boundaries of {@link Format#AUTO} detection are worth knowing, both reachable only through
- * a broken document and both loud rather than silent. First, the look-ahead reads at most the
- * first two non-blank lines, so a JSON Lines document whose first <em>two</em> lines are both
- * malformed is not recognised as line-delimited: it goes to the token stream, which typically
- * fails on the opening record and reports one failure for the source, losing the good records
- * after it. Second, a JSON Lines document whose first line is longer than {@link #PEEK_LIMIT}
- * is likewise read as a token stream, so a broken first line that long costs the records after
- * it too. {@code format=jsonl} skips the look-ahead entirely and reads either file correctly.
+ * a broken document and both loud rather than silent. First, the look-ahead gives up after
+ * {@link #MAX_PEEK_LINES} non-blank lines, so a JSON Lines document whose leading lines are all
+ * malformed that far down is not recognised as line-delimited: it goes to the token stream, which
+ * typically fails on the opening record and reports one failure for the source, losing the good
+ * records after it. Second, a JSON Lines document whose first line is
+ * longer than {@link #PEEK_LIMIT} is likewise read as a token stream, so a broken first line that
+ * long costs the records after it too. {@code format=jsonl} skips the look-ahead entirely and
+ * reads either file correctly.
+ * </p>
+ *
+ * <p>
+ * A {@code rootPath} outranks {@code format}: a document navigated by a JSON Pointer is always
+ * read as a token stream, because a pointer addresses a structure and JSON Lines has none, so
+ * {@code format=jsonl} together with a {@code rootPath} reads the document as a token stream
+ * rather than line by line. {@code JsonDataStore} says so in a warning when both are configured.
  * </p>
  */
 public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>, Closeable {
@@ -113,6 +121,22 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
      * </p>
      */
     private static final int PEEK_LIMIT = 65536;
+
+    /**
+     * Upper bound on how many non-blank lines the look-ahead examines before it settles on the
+     * token stream.
+     *
+     * <p>
+     * {@link #PEEK_LIMIT} already bounds this scan - it can never read more than 64K characters
+     * however many lines those are - but 64K of very short lines is tens of thousands of failed
+     * Jackson parses, each of which builds an exception, and that cost would be paid once per
+     * source. A line count bounds the work directly. 64 is far more than the handful of lines a
+     * banner or a progress log puts above an export, and stopping there also keeps the scan from
+     * wandering deep into a document that is not line-delimited at all looking for a line that
+     * happens to parse.
+     * </p>
+     */
+    private static final int MAX_PEEK_LINES = 64;
 
     /** The document shape this reader expects. */
     public enum Format {
@@ -169,6 +193,12 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
     private int lineCounter;
 
     /**
+     * The character read just past a {@code '\r'} that turned out not to be part of {@code "\r\n"},
+     * or {@code -1} when none is held. See {@link #readRawLine(Reader)}.
+     */
+    private int pushedBackChar = -1;
+
+    /**
      * A token-stream failure raised by {@link #hasNext()} and held back so that {@link #next()}
      * throws it instead. See {@link #hasNext()} for why.
      */
@@ -196,7 +226,10 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
             // Skip the look-ahead entirely when it cannot change the outcome. format=json and a
             // rootPath both mean "token stream" already, and those are exactly the two
             // configurations that exist to stream a large structured document - peeking at them
-            // would buffer part of a document whose whole point is not to be buffered.
+            // would buffer part of a document whose whole point is not to be buffered. A rootPath
+            // therefore outranks format=jsonl too: a pointer addresses a structure, and JSON Lines
+            // has none. JsonDataStore warns when both are configured, so that combination is not
+            // resolved in silence.
             if (StringUtil.isBlank(rootPath) && format != Format.JSON) {
                 // Everything the look-ahead reads is kept so it can be put back: whichever path
                 // runs then sees the document from its very first character, line breaks
@@ -264,10 +297,18 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
      * {@link Format#JSONL} needs only the first non-whitespace character, and only to reject an
      * array. {@link Format#AUTO} needs a little more: a leading {@code '['} is an array, and
      * otherwise the question is whether a line of this document stands alone as a whole record.
-     * The first two non-blank lines are tried, not just the first, because the first line is
-     * exactly the one likely to be broken - a stray log line, a download cut off mid-record. In
-     * JSON Lines the second line is another whole record; in a single pretty-printed object it
-     * is a fragment such as {@code "a": 1,}, which settles it either way.
+     * Every non-blank line within the budget is tried, not just the first, because the leading
+     * lines are exactly the ones likely to be broken - a banner, a download progress log, a
+     * record cut off mid-transfer - and however many of those sit above a JSON Lines export, the
+     * records below them are still records. One line that stands alone as a whole object settles
+     * it.
+     * </p>
+     *
+     * <p>
+     * What keeps that from dragging a pretty-printed document onto the line path is the
+     * asymmetry in {@link #parsesAsCompleteObject(String, boolean)}: only the first line is read
+     * leniently, and every line after it must parse with nothing left over, which the inner lines
+     * of a pretty-printed object ({@code "a" : 1,}, {@code {"b":1}}}) never do.
      * </p>
      *
      * <p>
@@ -288,7 +329,7 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
         int c;
         while (consumed.length() < PEEK_LIMIT && (c = in.read()) != -1) {
             consumed.append((char) c);
-            if (c == '\n') {
+            if (c == '\n' || c == '\r') {
                 lineStart = consumed.length();
             } else if (!Character.isWhitespace((char) c)) {
                 first = (char) c;
@@ -309,16 +350,65 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
         }
 
         final String firstLine = peekLine(in, consumed, lineStart);
-        if (firstLine == null || parsesAsCompleteObject(firstLine, false)) {
-            return firstLine != null;
+        if (firstLine == null) {
+            // The budget ran out before this line ended: a minified document, or one enormous
+            // record. The token stream reads either of those without buffering.
+            return false;
         }
-        final String secondLine = peekNonBlankLine(in, consumed);
-        return secondLine != null && parsesAsCompleteObject(secondLine, true);
+        if (parsesAsCompleteObject(firstLine, false)) {
+            return true;
+        }
+        // A broken first line says nothing about the rest of the document, and neither does a
+        // broken second one: two lines of banner, or of transfer progress, above a JSON Lines
+        // export is an ordinary thing for a file to have. Keep looking until a line stands alone
+        // as a whole record, or until the budget runs out.
+        for (int line = 1; line < MAX_PEEK_LINES; line++) {
+            final String nextLine = peekNonBlankLine(in, consumed);
+            if (nextLine == null) {
+                return false;
+            }
+            if (startsAtColumnZero(nextLine) && parsesAsCompleteObject(nextLine, true)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
-     * Reads one line into {@code consumed}, up to and including its {@code '\n'}, within the
+     * Reports whether a line begins with its own first character rather than with indentation.
+     *
+     * <p>
+     * This is the second half of what keeps the look-ahead from tearing up a document that is not
+     * line-delimited. Strictness alone is not enough: a wrapper object holding an array whose last
+     * element is minified onto its own line, as in {@code {\n"items": [\n{"a":1},\n{"a":2}\n]\n}},
+     * offers the line {@code {"a":2}} - a complete object with nothing after it - even though it
+     * is a fragment of one record, not a record. Every such fragment is indented by the printer
+     * that produced it, whereas a JSON Lines record starts at the left margin, so requiring column
+     * zero rules the fragment out. Only the recovery scan applies this: the first line is checked
+     * leniently and unconditionally, so a JSON Lines file that does indent its records is still
+     * recognised from that line.
+     * </p>
+     *
+     * @param line the line to test
+     * @return {@code true} if the line's first character is not whitespace
+     */
+    private static boolean startsAtColumnZero(final String line) {
+        return !line.isEmpty() && !Character.isWhitespace(line.charAt(0));
+    }
+
+    /**
+     * Reads one line into {@code consumed}, up to and including its terminator, within the
      * remaining look-ahead budget.
+     *
+     * <p>
+     * Both {@code '\n'} and a lone {@code '\r'} end a line here, matching
+     * {@link #readRawLine(Reader)} so that the look-ahead and the read that follows it agree on
+     * what a line is. The two differ on {@code "\r\n"} only: this method ends the line at the
+     * {@code '\r'} and leaves the {@code '\n'} to open the next one, where it reads as a blank
+     * line and is skipped. That costs nothing - the look-ahead pushes every character back and
+     * takes no line numbers - and it keeps this method free of the one-character lookahead that
+     * joining the pair would need.
+     * </p>
      *
      * @param in the reader to read from
      * @param consumed the look-ahead buffer to append to
@@ -330,7 +420,7 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
         int c;
         while (consumed.length() < PEEK_LIMIT && (c = in.read()) != -1) {
             consumed.append((char) c);
-            if (c == '\n') {
+            if (c == '\n' || c == '\r') {
                 return consumed.substring(start);
             }
         }
@@ -373,12 +463,12 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
      *
      * <p>
      * {@code strict} additionally rejects a line that merely <em>begins</em> with a complete
-     * object. The second-line check needs that, because it is asked about lines that follow a
-     * first line which did not parse: {@code {"a":\n{"b":1}}} is one valid object whose second
-     * line reads {@code {"b":1}}}, and without the check that stray closing brace is ignored,
-     * the line looks like a whole record and the document is torn up as JSON Lines. The
-     * first-line check deliberately stays lenient: a first line holding two objects back to back
-     * and yielding only the first is behaviour that predates this phase.
+     * object. Every line after the first is checked that way, because those are the lines the
+     * look-ahead asks about once the first one has failed to parse: {@code {"a":\n{"b":1}}} is one
+     * valid object whose second line reads {@code {"b":1}}}, and without the check that stray
+     * closing brace is ignored, the line looks like a whole record and the document is torn up as
+     * JSON Lines. The first-line check deliberately stays lenient: a first line holding two
+     * objects back to back and yielding only the first is behaviour that predates this phase.
      * </p>
      *
      * <p>
@@ -403,30 +493,66 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
     }
 
     /**
-     * Reads one line, keeping every character exactly as it appeared, including the terminating
-     * {@code '\n'}.
+     * Reads one line, keeping every character exactly as it appeared, including its terminator.
      *
      * <p>
      * {@link BufferedReader#readLine()} is not used because it discards the terminator and does
-     * not say which one it discarded, and the token path needs the characters back verbatim for
-     * its line numbers to match the file. A lone {@code '\r'} is treated as ordinary whitespace
-     * rather than as a line terminator.
+     * not say which one it discarded, and this reader needs the characters back verbatim. Which
+     * characters terminate a line is the same here as there: {@code '\n'}, a lone {@code '\r'},
+     * or {@code "\r\n"}. A lone {@code '\r'} has to count, because a file written that way is one
+     * enormous line otherwise, and every record after the first is silently dropped by the lenient
+     * parse of it.
+     * </p>
+     *
+     * <p>
+     * {@code "\r\n"} is one terminator, not two, so the {@code '\n'} is joined to the line the
+     * {@code '\r'} ended rather than left to open an empty one. Telling the pair apart needs one
+     * character of lookahead, and the character read to do it belongs to the next line when it
+     * turns out not to be a {@code '\n'}; {@link #pushedBackChar} holds it until then. The reader
+     * itself cannot be asked to take it back: it is whichever wrapper the constructor built, and
+     * neither {@link BufferedReader} nor a full {@link PushbackReader} can be relied on to accept
+     * one.
      * </p>
      *
      * @param in the reader to read from
      * @return the line, or {@code null} at end of stream
      * @throws IOException if the stream cannot be read
      */
-    private static String readRawLine(final Reader in) throws IOException {
+    private String readRawLine(final Reader in) throws IOException {
         final StringBuilder line = new StringBuilder();
         int c;
-        while ((c = in.read()) != -1) {
+        while ((c = nextChar(in)) != -1) {
             line.append((char) c);
             if (c == '\n') {
                 break;
             }
+            if (c == '\r') {
+                final int following = nextChar(in);
+                if (following == '\n') {
+                    line.append('\n');
+                } else if (following != -1) {
+                    pushedBackChar = following;
+                }
+                break;
+            }
         }
         return line.length() == 0 ? null : line.toString();
+    }
+
+    /**
+     * Reads the next character, taking the one held back by the {@code "\r\n"} lookahead first.
+     *
+     * @param in the reader to read from
+     * @return the character, or {@code -1} at end of stream
+     * @throws IOException if the stream cannot be read
+     */
+    private int nextChar(final Reader in) throws IOException {
+        if (pushedBackChar != -1) {
+            final int c = pushedBackChar;
+            pushedBackChar = -1;
+            return c;
+        }
+        return in.read();
     }
 
     /**

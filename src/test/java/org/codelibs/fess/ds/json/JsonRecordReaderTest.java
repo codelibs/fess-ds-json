@@ -197,6 +197,140 @@ public class JsonRecordReaderTest {
         assertFalse(isLineOriented("{\n  \"a\": 1,\n  \"b\": 2\n}\n"), "a pretty-printed object is not");
     }
 
+    /**
+     * Two broken lines above the records are as ordinary as one - a banner, or two lines of
+     * transfer progress - so the look-ahead must not stop after the second. It reads on until a
+     * line stands alone as a whole record.
+     */
+    @Test
+    public void test_auto_severalMalformedLeadingLinesAreStillJsonLines() throws IOException {
+        assertTrue(isLineOriented("garbage one\ngarbage two\n{\"a\":3}\n{\"a\":4}\n"), "a two-line banner above records is JSON Lines");
+        assertTrue(isLineOriented("g1\ng2\ng3\ng4\ng5\n{\"a\":6}\n"), "and a five-line one is too");
+
+        final List<Object> outcomes = readOutcomes("garbage one\ngarbage two\n{\"a\":3}\n{\"a\":4}\n", Format.AUTO, null);
+        assertEquals(4, outcomes.size(), "one outcome per non-blank line: " + outcomes);
+        assertTrue(outcomes.get(0) instanceof DataStoreException, "first banner line fails on its own: " + outcomes.get(0));
+        assertTrue(outcomes.get(1) instanceof DataStoreException, "second banner line fails on its own: " + outcomes.get(1));
+        assertEquals(3, ((Map<?, ?>) outcomes.get(2)).get("a"), "the records below the banner survive");
+        assertEquals(4, ((Map<?, ?>) outcomes.get(3)).get("a"), "all of them");
+    }
+
+    /**
+     * The scan that recovers from broken leading lines must not drag a pretty-printed document
+     * onto the line path, however many lines it has: every line after the first is parsed
+     * strictly, and a pretty-printed object has no line that stands alone as a whole object.
+     */
+    @Test
+    public void test_auto_prettyPrintedObjectWithManyLinesIsTokenStream() throws IOException {
+        final StringBuilder pretty = new StringBuilder("{\n");
+        for (int i = 0; i < 200; i++) {
+            pretty.append("  \"k").append(i).append("\": ").append(i).append(",\n");
+        }
+        final String json = pretty.append("  \"last\": true\n}\n").toString();
+
+        assertFalse(isLineOriented(json), "a 202-line pretty-printed object is not line-delimited");
+        final List<Map<String, Object>> records = readAll(json);
+        assertEquals(1, records.size(), "the token stream reads it as one record: " + records.size());
+        assertEquals(0, records.get(0).get("k0"));
+        assertEquals(Boolean.TRUE, records.get(0).get("last"));
+    }
+
+    /**
+     * A complete object indented onto its own line is a fragment of a record, not a record: the
+     * last element of a nested array is written exactly that way, with no comma after it, so
+     * strictness alone would accept it. Requiring the line to start at column zero rules it out.
+     */
+    @Test
+    public void test_auto_indentedCompleteObjectIsNotARecord() throws IOException {
+        final String json = "{\n  \"items\": [\n    {\"a\":1},\n    {\"a\":2}\n  ]\n}\n";
+
+        assertFalse(isLineOriented(json), "a wrapper object holding minified array elements is not line-delimited");
+        final List<Map<String, Object>> records = readAll(json);
+        assertEquals(1, records.size(), "the whole wrapper is one record: " + records);
+        assertTrue(records.get(0).get("items") instanceof List, "the nested array survives: " + records.get(0));
+    }
+
+    /**
+     * A document that never offers a parseable line must fail cleanly on the token stream rather
+     * than be scanned for one indefinitely.
+     */
+    @Test
+    public void test_auto_allMalformedDocumentFailsCleanlyOnTheTokenStream() {
+        assertThrows(IOException.class, () -> readAll("garbage one\ngarbage two\ngarbage three\n"),
+                "nothing here stands alone as a record, so the token stream reads it and rejects the first token");
+    }
+
+    /**
+     * The recovery scan is bounded: it looks a fixed number of lines down, not through the whole
+     * document. A file of one-character junk lines is otherwise tens of thousands of failed parses
+     * before the reader has decided anything, once per source.
+     */
+    @Test
+    public void test_auto_recoveryScanIsBounded() throws IOException {
+        assertTrue(isLineOriented(junkLines(63) + "{\"a\":1}\n"), "a record 63 lines down is still found");
+        assertThrows(IOException.class, () -> readAll(junkLines(64) + "{\"a\":1}\n"),
+                "one line further down is past the bound, so the document goes to the token stream");
+    }
+
+    private String junkLines(final int count) {
+        final StringBuilder junk = new StringBuilder();
+        for (int i = 0; i < count; i++) {
+            junk.append("x\n");
+        }
+        return junk.toString();
+    }
+
+    /**
+     * A file written with lone {@code '\r'} terminators must yield every record, not just the
+     * first. Without CR handling the whole file is one line, the lenient first-line parse accepts
+     * it, and every record after the first is dropped with no failure recorded at all.
+     */
+    @Test
+    public void test_crOnlyLineEndings() throws IOException {
+        final List<Map<String, Object>> list = readAll("{\"a\":1}\r{\"a\":2}\r{\"a\":3}\r");
+        assertEquals(3, list.size(), "every CR-terminated record is read: " + list);
+        assertEquals(1, list.get(0).get("a"));
+        assertEquals(3, list.get(2).get("a"));
+
+        final List<Map<String, Object>> forced = readAll("{\"a\":1}\r{\"a\":2}\r", Format.JSONL, null);
+        assertEquals(2, forced.size(), "format=jsonl reads them too: " + forced);
+    }
+
+    /**
+     * {@code "\r\n"} is one terminator, not two: joining the pair keeps a CRLF file from gaining
+     * a blank line between every record, which would shift every line number after the first.
+     */
+    @Test
+    public void test_crlfLineEndings_haveNoPhantomBlankLines() throws IOException {
+        final String json = "{\"a\":1}\r\n{\"a\":2}\r\n{\"a\":3}\r\n";
+        final List<Map<String, Object>> list = readAll(json);
+        assertEquals(3, list.size(), "every CRLF-terminated record is read: " + list);
+
+        final List<Integer> lineNumbers = new ArrayList<>();
+        try (JsonRecordReader reader = openReader(json, Format.AUTO, null)) {
+            while (reader.hasNext()) {
+                reader.next();
+                lineNumbers.add(reader.getCurrentLineNumber());
+            }
+        }
+        assertEquals(List.of(1, 2, 3), lineNumbers, "records sit on lines 1, 2 and 3, not 1, 3 and 5");
+    }
+
+    /**
+     * Line numbers must count CR-terminated lines the way an editor does.
+     */
+    @Test
+    public void test_getCurrentLineNumber_crOnly() throws IOException {
+        final List<Integer> lineNumbers = new ArrayList<>();
+        try (JsonRecordReader reader = openReader("{\"a\":1}\r{\"a\":2}\r{\"a\":3}\r", Format.AUTO, null)) {
+            while (reader.hasNext()) {
+                reader.next();
+                lineNumbers.add(reader.getCurrentLineNumber());
+            }
+        }
+        assertEquals(List.of(1, 2, 3), lineNumbers);
+    }
+
     private boolean isLineOriented(final String json) throws IOException {
         try (JsonRecordReader reader = openReader(json, Format.AUTO, null)) {
             return reader.isLineOriented();

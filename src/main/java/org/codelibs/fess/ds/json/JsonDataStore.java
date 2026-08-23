@@ -25,6 +25,7 @@ import java.util.regex.Pattern;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codelibs.core.lang.StringUtil;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.app.service.FailureUrlService;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
@@ -142,6 +143,13 @@ public class JsonDataStore extends AbstractDataStore {
             return;
         }
         final String rootPath = paramMap.getAsString(ROOT_PATH_PARAM);
+        if (StringUtil.isNotBlank(rootPath) && format == JsonRecordReader.Format.JSONL) {
+            // Not an error, and not worth abandoning the crawl over, but the two parameters
+            // contradict each other and only one of them can win. Say which, rather than leave
+            // the user to work out from the results that their format was quietly dropped.
+            logger.warn("{} is ignored because {} is set: a document reached through a JSON Pointer is read as a token stream, "
+                    + "not line by line.", FORMAT_PARAM, ROOT_PATH_PARAM);
+        }
         final List<JsonSource> sourceList = createSourceResolver().resolve(paramMap);
 
         if (sourceList.isEmpty()) {

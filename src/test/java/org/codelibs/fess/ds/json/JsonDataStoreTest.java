@@ -862,6 +862,127 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
+     * 1行目だけでなく2行目も壊れている JSONL から、3行目以降が失われないことを検証する。
+     * 2行のバナーや2行分の転送進捗が JSONL エクスポートの上に付くのはありふれた形であり、
+     * マージ元 (1aaa07a) はそれらの2行だけを失って残りを登録していた。先読みが最初の2行で
+     * 打ち切ると、両方失敗した時点でトークンストリームに落ち、ソース全体が消える。
+     */
+    @Test
+    public void test_storeData_twoBadLeadingLinesDoNotCostTheRecordsBelow() throws Exception {
+        final Path file = Files.createTempFile("twobanner", ".jsonl");
+
+        try {
+            Files.writeString(file, "garbage one\ngarbage two\n{\"url\":\"http://example.com/3\"}\n{\"url\":\"http://example.com/4\"}\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("both records below the two bad lines are stored: " + callback.getDataMapList(), 2,
+                    callback.getDataMapList().size());
+            assertEquals("http://example.com/3", callback.getDataMapList().get(0).get("url"));
+            assertEquals("http://example.com/4", callback.getDataMapList().get(1).get("url"));
+            assertEquals("each bad line costs exactly itself: " + failureUrls, 2, failureUrls.size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * 行末が {@code '\r'} だけのファイルでも全レコードが登録されることを検証する。
+     * {@code '\r'} を行終端として扱わないとファイル全体が1行になり、寛容なパースが
+     * 先頭の1件だけを返して残りが失敗記録もログもなく消える。本ブランチで唯一の
+     * 「黙って失われる」経路だった。
+     */
+    @Test
+    public void test_storeData_crOnlyLineEndings() throws Exception {
+        final Path file = Files.createTempFile("cronly", ".jsonl");
+
+        try {
+            Files.write(file, "{\"url\":\"http://example.com/1\"}\r{\"url\":\"http://example.com/2\"}\r{\"url\":\"http://example.com/3\"}\r"
+                    .getBytes(StandardCharsets.UTF_8));
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("all three CR-terminated records are stored: " + callback.getDataMapList(), 3, callback.getDataMapList().size());
+            assertEquals("http://example.com/3", callback.getDataMapList().get(2).get("url"));
+            assertEquals("no failures: " + failureUrls, 0, failureUrls.size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * CRLF のファイルが、{@code "\r\n"} を2つの終端と数えて空行を挟むことなく読めることを
+     * 検証する。空行が挟まると失敗の行番号が実ファイルの行とずれる。
+     */
+    @Test
+    public void test_storeData_crlfLineEndings() throws Exception {
+        final Path file = Files.createTempFile("crlf", ".jsonl");
+
+        try {
+            Files.write(file, "{\"url\":\"http://example.com/1\"}\r\n{not valid json\r\n{\"url\":\"http://example.com/3\"}\r\n"
+                    .getBytes(StandardCharsets.UTF_8));
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("both valid records are stored: " + callback.getDataMapList(), 2, callback.getDataMapList().size());
+            assertEquals("only the malformed line fails: " + failureUrls, 1, failureUrls.size());
+            assertTrue("the failure points at real line 2, so no phantom blank lines were counted: " + failureUrls,
+                    failureUrls.get(0).endsWith("@2"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * root_path と format=jsonl が同時に指定されたとき、format が黙って捨てられるのではなく
+     * 警告として残ることを検証する。JSON Pointer で辿るドキュメントは構造を持つため
+     * トークンストリームで読むしかなく、解決自体は正しいが、黙って行うべきではない。
+     */
+    @Test
+    public void test_storeData_rootPathWithFormatJsonlIsWarned() throws Exception {
+        final Path file = Files.createTempFile("rootpathjsonl", ".json");
+
+        try {
+            Files.writeString(file, "{\"data\":{\"items\":[{\"url\":\"http://example.com/1\"}]}}");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            params.put("root_path", "/data/items");
+            params.put("format", "jsonl");
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            final List<String> logMessages =
+                    captureDataStoreLogs(() -> dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>()));
+
+            assertEquals("the nested record is still read", 1, callback.getDataMapList().size());
+            assertTrue("the ignored parameter must be named out loud: " + logMessages,
+                    logMessages.stream().anyMatch(m -> m.contains("format is ignored because root_path is set")));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
      * 配列内の1件の不正な要素が、失敗記録1件で報告されることを検証する。トークンストリームは
      * 不正な区間を1文字ずつ踏み越えながら失敗を繰り返すため、素直に記録すると同じ URL に
      * 対する同一の失敗記録が積み上がる。
