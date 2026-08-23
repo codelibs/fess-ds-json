@@ -57,9 +57,15 @@ import org.codelibs.fess.util.ComponentUtil;
  * <ul>
  * <li>files - Comma-separated list of file paths to process</li>
  * <li>directories - Comma-separated list of directory paths to scan</li>
+ * <li>recursive - Whether directories are scanned below their top level (default: false)</li>
+ * <li>max_depth - How far below each directory recursion may go (default: 10)</li>
+ * <li>include_pattern - Regular expression an absolute file path must match in full</li>
+ * <li>exclude_pattern - Regular expression an absolute file path must not match in full</li>
+ * <li>file_suffixes - Comma-separated file suffixes to accept (default: .json, .jsonl)</li>
  * <li>file_encoding - Character encoding for files (default: UTF-8)</li>
  * <li>format - Document shape: auto, jsonl or json (default: auto)</li>
- * <li>root_path - JSON Pointer selecting a nested array to read records from</li>
+ * <li>root_path - JSON Pointer selecting a nested array to read records from; a document read
+ * through one is always read as a token stream, so it outranks format</li>
  * </ul>
  */
 public class JsonDataStore extends AbstractDataStore {
@@ -295,12 +301,12 @@ public class JsonDataStore extends AbstractDataStore {
      * returns {@code null}. Dropping the key was rejected anyway, on grounds independent of that
      * outcome: keeping it present-and-null never invokes the script engine for a blocked
      * parameter at all, so blocking a field costs no script compile and no WARN per record; it
-     * does not depend on Groovy specifically, so a {@code scriptType} with no engine registered
-     * for it - as in this project's own unit tests, which register no
-     * {@link org.codelibs.fess.script.ScriptEngineFactory} - genuinely does fail the whole record
-     * on the dropped-key fallback path; and it is the only shape under which "the record is
-     * still indexed with the field simply absent" can be relied on regardless of which script
-     * engine is configured. Keeping the key present with {@code containsKey() == true} and a
+     * does not depend on Groovy specifically, so a {@code scriptType} naming an engine that is
+     * not registered - a configuration this data store neither controls nor validates - would
+     * genuinely fail the whole record on the dropped-key fallback path; and it is the only shape
+     * under which "the record is still indexed with the field simply absent" can be relied on
+     * regardless of which script engine is configured. Keeping the key present with
+     * {@code containsKey() == true} and a
      * {@code null} value instead lets {@code convertValue}'s exact-match fast path apply and
      * return {@code null} directly. It also keeps this filter from fighting the override in
      * {@link #processSource}: a record field of the same name still replaces this {@code null}
@@ -326,10 +332,12 @@ public class JsonDataStore extends AbstractDataStore {
      * the key is simply absent (not merely {@code null}) for a source's first record, and
      * present-and-{@code null} with the <em>previous</em> source's stale {@code StatsKeyObject}
      * for every source read after the first. Nothing currently reads this key from a script, so
-     * this has no observed effect, but it is not intentional filtering: if this constant's
-     * spelling ever changes so it no longer matches {@code encryptPropertyPattern}, a script
-     * would start seeing a stale {@code StatsKeyObject} from the previous source - so treat a
-     * rename of that constant as a reason to re-examine this.
+     * this has no observed effect, but it is not intentional filtering: the moment the key stops
+     * matching {@code encryptPropertyPattern}, a script starts seeing the stale
+     * {@code StatsKeyObject} left over from the previous source. Two independent changes end the
+     * coincidence - a rename of the constant, and an administrator narrowing
+     * {@code app.encrypt.property.pattern} so it no longer matches "crawler.stats.key" - so treat
+     * either as a reason to re-examine this.
      * </p>
      *
      * @param paramMap the data store parameters

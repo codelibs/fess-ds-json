@@ -1030,9 +1030,11 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 配列内の1件の不正な要素が、失敗記録1件で報告されることを検証する。トークンストリームは
-     * 不正な区間を1文字ずつ踏み越えながら失敗を繰り返すため、素直に記録すると同じ URL に
-     * 対する同一の失敗記録が積み上がる。
+     * 配列内の1件の不正な要素が、失敗記録1件で報告され、かつ前後の正常な要素が2件とも
+     * 登録されることを検証する。トークンストリームは不正な区間を1文字ずつ踏み越えながら
+     * 失敗を繰り返すため、素直に記録すると同じ URL に対する同一の失敗記録が積み上がる。
+     * 失敗件数だけを見ると、不正要素のあとの要素が丸ごと消えても緑のままになる。そちらが
+     * 保証として重い。
      */
     @Test
     public void test_storeData_oneBadArrayElementIsOneFailure() throws Exception {
@@ -1051,6 +1053,11 @@ public class JsonDataStoreTest extends UnitDsTestCase {
             dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
 
             assertEquals("one bad element is one failure record, not one per parser hiccup: " + failureUrls, 1, failureUrls.size());
+            assertEquals("the elements on either side of the bad one are both stored: " + callback.getDataMapList(), 2,
+                    callback.getDataMapList().size());
+            assertEquals("http://example.com/1", callback.getDataMapList().get(0).get("url"));
+            assertEquals("the token stream recovers past the bad element rather than dropping the rest of the array",
+                    "http://example.com/3", callback.getDataMapList().get(1).get("url"));
         } finally {
             Files.deleteIfExists(file);
         }
