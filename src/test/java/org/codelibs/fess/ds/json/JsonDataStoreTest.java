@@ -15,36 +15,47 @@
  */
 package org.codelibs.fess.ds.json;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 
 import java.io.File;
-import java.io.IOException;
+import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.codelibs.fess.Constants;
+import org.codelibs.fess.app.service.FailureUrlService;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.entity.DataStoreParams;
+import org.codelibs.fess.exception.DataStoreCrawlingException;
 import org.codelibs.fess.exception.DataStoreException;
+import org.codelibs.fess.helper.CrawlerStatsHelper;
+import org.codelibs.fess.helper.SystemHelper;
+import org.codelibs.fess.opensearch.config.exentity.CrawlingConfig;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
+import org.codelibs.fess.opensearch.config.exentity.FailureUrl;
 import org.codelibs.fess.util.ComponentUtil;
-import org.codelibs.fess.ds.json.UnitDsTestCase;
-import org.lastaflute.di.core.exception.ComponentNotFoundException;
 
 /**
  * Comprehensive unit tests for JsonDataStore class.
  * Tests cover file detection, encoding handling, JSON/JSONL processing,
  * file list management, and error scenarios.
  *
- * Note: Some tests that require full DI container initialization (e.g., CrawlerStatsHelper)
- * are designed to handle exceptions (NullPointerException, ComponentNotFoundException)
- * gracefully, as these dependencies may not be available in the unit test environment.
+ * Note: setUp registers SystemHelper, an initialized CrawlerStatsHelper and a recording
+ * FailureUrlService stub in the DI container so that storeData tests exercise the full
+ * pipeline (including error recording) rather than mocking or catching exceptions.
  */
 public class JsonDataStoreTest extends UnitDsTestCase {
     public JsonDataStore dataStore;
+
+    /** FailureUrlService に記録された失敗を "<errorName> @ <url>" 形式で保持する。 */
+    public final List<String> failureUrls = new ArrayList<>();
 
     @Override
     protected String prepareConfigFile() {
@@ -60,6 +71,24 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     public void setUp(TestInfo testInfo) throws Exception {
         super.setUp(testInfo);
         dataStore = new JsonDataStore();
+        failureUrls.clear();
+
+        // storeData は CrawlerStatsHelper を使い、CrawlerStatsHelper は SystemHelper を使う。
+        // 初期化済みインスタンスを登録してパイプライン全体をテスト内で通せるようにする。
+        ComponentUtil.register(new SystemHelper(), "systemHelper");
+        final CrawlerStatsHelper crawlerStatsHelper = new CrawlerStatsHelper();
+        crawlerStatsHelper.init();
+        ComponentUtil.register(crawlerStatsHelper, "crawlerStatsHelper");
+
+        // 失敗記録の本物は OpenSearch を要求するため、記録内容だけを控える no-op に差し替える。
+        // ComponentUtil.getComponent(Class) が解決できるよう正準名で登録する。
+        ComponentUtil.register(new FailureUrlService() {
+            @Override
+            public FailureUrl store(final CrawlingConfig crawlingConfig, final String errorName, final String url, final Throwable e) {
+                failureUrls.add(errorName + " @ " + url);
+                return null;
+            }
+        }, FailureUrlService.class.getCanonicalName());
     }
 
     @Override
@@ -81,23 +110,21 @@ public class JsonDataStoreTest extends UnitDsTestCase {
      */
     @Test
     public void test_isDesiredFile_defaultSuffixes() throws Exception {
-        File parentDir = new File("/tmp");
-
         // Test .json files
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.json"));
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", parentDir, "TEST.JSON"));
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", parentDir, "data.Json"));
+        assertTrue(invokeMethod(dataStore, "isDesiredFile", "test.json"));
+        assertTrue(invokeMethod(dataStore, "isDesiredFile", "TEST.JSON"));
+        assertTrue(invokeMethod(dataStore, "isDesiredFile", "data.Json"));
 
         // Test .jsonl files
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.jsonl"));
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", parentDir, "TEST.JSONL"));
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", parentDir, "data.Jsonl"));
+        assertTrue(invokeMethod(dataStore, "isDesiredFile", "test.jsonl"));
+        assertTrue(invokeMethod(dataStore, "isDesiredFile", "TEST.JSONL"));
+        assertTrue(invokeMethod(dataStore, "isDesiredFile", "data.Jsonl"));
 
         // Test non-JSON files
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.txt"));
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.xml"));
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.csv"));
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", parentDir, "testjson"));
+        assertFalse(invokeMethod(dataStore, "isDesiredFile", "test.txt"));
+        assertFalse(invokeMethod(dataStore, "isDesiredFile", "test.xml"));
+        assertFalse(invokeMethod(dataStore, "isDesiredFile", "test.csv"));
+        assertFalse(invokeMethod(dataStore, "isDesiredFile", "testjson"));
     }
 
     /**
@@ -106,12 +133,11 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     @Test
     public void test_setFileSuffixes_customSuffixes() throws Exception {
         dataStore.setFileSuffixes(new String[] { ".data", ".txt" });
-        File parentDir = new File("/tmp");
 
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.data"));
-        assertTrue(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.txt"));
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.json"));
-        assertFalse(invokeMethod(dataStore, "isDesiredFile", parentDir, "test.jsonl"));
+        assertTrue(invokeMethod(dataStore, "isDesiredFile", "test.data"));
+        assertTrue(invokeMethod(dataStore, "isDesiredFile", "test.txt"));
+        assertFalse(invokeMethod(dataStore, "isDesiredFile", "test.json"));
+        assertFalse(invokeMethod(dataStore, "isDesiredFile", "test.jsonl"));
     }
 
     /**
@@ -362,12 +388,62 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
+     * カンマ区切りのパスに前後の空白があっても解決できることを検証する。
+     */
+    @Test
+    public void test_getFileList_withFilesParameter_trimsWhitespace() throws Exception {
+        final Path tempDir = Files.createTempDirectory("jsontrim");
+        final Path a = Files.createFile(tempDir.resolve("a.json"));
+        final Path b = Files.createFile(tempDir.resolve("b.jsonl"));
+
+        try {
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", a + " , " + b);
+
+            final Method method = JsonDataStore.class.getDeclaredMethod("getFileList", DataStoreParams.class);
+            method.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            final List<File> fileList = (List<File>) method.invoke(dataStore, params);
+
+            assertEquals("both paths resolve after trimming", 2, fileList.size());
+        } finally {
+            Files.deleteIfExists(a);
+            Files.deleteIfExists(b);
+            Files.deleteIfExists(tempDir);
+        }
+    }
+
+    /**
+     * ディレクトリ指定でも前後の空白と空要素を許容することを検証する。
+     */
+    @Test
+    public void test_getFileList_withDirectoriesParameter_trimsWhitespace() throws Exception {
+        final Path tempDir = Files.createTempDirectory("jsontrimdir");
+        Files.createFile(tempDir.resolve("a.json"));
+
+        try {
+            final DataStoreParams params = new DataStoreParams();
+            params.put("directories", " " + tempDir + " , ");
+
+            final Method method = JsonDataStore.class.getDeclaredMethod("getFileList", DataStoreParams.class);
+            method.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            final List<File> fileList = (List<File>) method.invoke(dataStore, params);
+
+            assertEquals("whitespace-only element is skipped, directory resolves", 1, fileList.size());
+        } finally {
+            Files.deleteIfExists(tempDir.resolve("a.json"));
+            Files.deleteIfExists(tempDir);
+        }
+    }
+
+    /**
      * Test storeData with empty file list.
      */
     @Test
     public void test_storeData_emptyFileList() throws Exception {
         DataConfig dataConfig = new DataConfig();
-        IndexUpdateCallback callback = new TestIndexUpdateCallback();
+        TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
         DataStoreParams params = new DataStoreParams();
         Map<String, String> scriptMap = new HashMap<>();
         Map<String, Object> defaultDataMap = new HashMap<>();
@@ -378,49 +454,44 @@ public class JsonDataStoreTest extends UnitDsTestCase {
         // This should log a warning and return without processing
         dataStore.storeData(dataConfig, callback, params, scriptMap, defaultDataMap);
 
-        // No exception should be thrown
-        assertTrue(true);
+        // The callback must not receive anything when there is nothing to process.
+        assertTrue("callback should receive no records for an empty file list", callback.getDataMapList().isEmpty());
     }
 
     /**
-     * Test storeData with valid JSON files.
-     * This is an integration test that verifies the complete flow including processFile.
+     * storeData が JSON/JSONL の全レコードを callback に渡すことを検証する。
      */
     @Test
     public void test_storeData_withValidFiles() throws Exception {
-        Path tempDir = Files.createTempDirectory("jsontest");
-        Path jsonFile = Files.createTempFile(tempDir, "test", ".json");
-        Path jsonlFile = Files.createTempFile(tempDir, "test", ".jsonl");
+        final Path tempDir = Files.createTempDirectory("jsontest");
+        final Path jsonFile = tempDir.resolve("a.json");
+        final Path jsonlFile = tempDir.resolve("b.jsonl");
 
         try {
-            // Write valid JSON
-            String json = "{\"id\": \"123\", \"title\": \"Test\"}";
-            Files.write(jsonFile, json.getBytes());
+            Files.writeString(jsonFile, "{\"id\":\"123\",\"title\":\"Test\",\"url\":\"http://example.com/1\"}\n");
+            Files.writeString(jsonlFile, "{\"id\":\"1\",\"title\":\"First\",\"url\":\"http://example.com/2\"}\n"
+                    + "{\"id\":\"2\",\"title\":\"Second\",\"url\":\"http://example.com/3\"}\n");
 
-            // Write valid JSONL (2 lines)
-            String jsonl = "{\"id\": \"1\", \"title\": \"First\"}\n{\"id\": \"2\", \"title\": \"Second\"}";
-            Files.write(jsonlFile, jsonl.getBytes());
-
-            DataConfig dataConfig = new DataConfig();
-            TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
-            DataStoreParams params = new DataStoreParams();
-            Map<String, String> scriptMap = new HashMap<>();
-            Map<String, Object> defaultDataMap = new HashMap<>();
-
-            // Set directory parameter
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
             params.put("directories", tempDir.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+            scriptMap.put("title", "title");
 
-            // Note: This test may fail if dependencies (CrawlerStatsHelper, etc.) are not properly initialized
-            // In a real environment, these would be set up through the DI container
-            try {
-                dataStore.storeData(dataConfig, callback, params, scriptMap, defaultDataMap);
-                // If successful, callback should have been called 3 times (1 JSON + 2 JSONL lines)
-                // However, this requires proper dependency setup which may not be available in test environment
-            } catch (NullPointerException | ComponentNotFoundException e) {
-                // Expected if dependencies are not initialized in DI container
-                // This is acceptable for this unit test
-                assertTrue("Exception expected when dependencies not initialized: " + e.getClass().getSimpleName(), true);
-            }
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            final List<Map<String, Object>> dataMapList = callback.getDataMapList();
+            assertEquals("1 record from .json + 2 records from .jsonl", 3, dataMapList.size());
+            assertEquals("no failures should be recorded", 0, failureUrls.size());
+
+            // Processing order between files is not guaranteed (it depends on filesystem
+            // mtime resolution), so look up each record by its unique url instead of
+            // asserting on list position.
+            final Map<String, Object> firstJsonRecord =
+                    dataMapList.stream().filter(m -> "http://example.com/1".equals(m.get("url"))).findFirst().orElse(null);
+            assertNotNull("missing record for http://example.com/1", firstJsonRecord);
+            assertEquals("Test", firstJsonRecord.get("title"));
 
         } finally {
             Files.deleteIfExists(jsonFile);
@@ -430,33 +501,28 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * Test that file filtering works correctly - non-JSON files should be ignored.
+     * 拡張子が対象外のファイルが処理されないことを検証する。
      */
     @Test
     public void test_storeData_fileFiltering() throws Exception {
-        Path tempDir = Files.createTempDirectory("jsontest");
-        Path jsonFile = Files.createTempFile(tempDir, "test", ".json");
-        Path txtFile = Files.createTempFile(tempDir, "test", ".txt");
+        final Path tempDir = Files.createTempDirectory("jsontest");
+        final Path jsonFile = tempDir.resolve("a.json");
+        final Path txtFile = tempDir.resolve("b.txt");
 
         try {
-            Files.write(jsonFile, "{\"id\": \"1\"}".getBytes());
-            Files.write(txtFile, "not json".getBytes());
+            Files.writeString(jsonFile, "{\"url\":\"http://example.com/1\"}\n");
+            Files.writeString(txtFile, "{\"url\":\"http://example.com/2\"}\n");
 
-            DataConfig dataConfig = new DataConfig();
-            TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
-            DataStoreParams params = new DataStoreParams();
-            Map<String, String> scriptMap = new HashMap<>();
-            Map<String, Object> defaultDataMap = new HashMap<>();
-
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
             params.put("directories", tempDir.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
 
-            try {
-                dataStore.storeData(dataConfig, callback, params, scriptMap, defaultDataMap);
-                // Only JSON file should be processed, not TXT file
-            } catch (NullPointerException | ComponentNotFoundException e) {
-                // Expected if dependencies are not initialized in DI container
-                assertTrue("Exception expected when dependencies not initialized: " + e.getClass().getSimpleName(), true);
-            }
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("only the .json file is processed", 1, callback.getDataMapList().size());
+            assertEquals("http://example.com/1", callback.getDataMapList().get(0).get("url"));
 
         } finally {
             Files.deleteIfExists(jsonFile);
@@ -511,8 +577,292 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
+     * 空行・空白行が失敗として記録されずスキップされることを検証する。
+     */
+    @Test
+    public void test_storeData_skipsBlankLines() throws Exception {
+        final Path file = Files.createTempFile("blank", ".jsonl");
+
+        try {
+            Files.writeString(file,
+                    "{\"url\":\"http://example.com/1\"}\n" + "\n" + "   \n" + "{\"url\":\"http://example.com/2\"}\n" + "\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("two records are stored", 2, callback.getDataMapList().size());
+            assertEquals("blank lines are not recorded as failures: " + failureUrls, 0, failureUrls.size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * UTF-8 BOM 付きファイルの先頭レコードが読めることを検証する。
+     */
+    @Test
+    public void test_storeData_stripsUtf8Bom() throws Exception {
+        final Path file = Files.createTempFile("bom", ".jsonl");
+
+        try {
+            final byte[] bom = { (byte) 0xEF, (byte) 0xBB, (byte) 0xBF };
+            final byte[] body = "{\"url\":\"http://example.com/1\"}\n{\"url\":\"http://example.com/2\"}\n".getBytes(StandardCharsets.UTF_8);
+            final byte[] content = new byte[bom.length + body.length];
+            System.arraycopy(bom, 0, content, 0, bom.length);
+            System.arraycopy(body, 0, content, bom.length, body.length);
+            Files.write(file, content);
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("both records are stored: " + failureUrls, 2, callback.getDataMapList().size());
+            assertEquals("no failures", 0, failureUrls.size());
+            assertEquals("http://example.com/1", callback.getDataMapList().get(0).get("url"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * BOM-only first line followed by real records should result in no failures.
+     * This test enforces that BOM stripping occurs BEFORE the blank line check,
+     * so that a line containing only a BOM is correctly treated as blank and skipped.
+     */
+    @Test
+    public void test_storeData_bomOnlyFirstLineThenRecords() throws Exception {
+        final Path file = Files.createTempFile("bomonly", ".jsonl");
+
+        try {
+            final byte[] bom = { (byte) 0xEF, (byte) 0xBB, (byte) 0xBF };
+            final byte[] body =
+                    "\n{\"url\":\"http://example.com/1\"}\n{\"url\":\"http://example.com/2\"}\n".getBytes(StandardCharsets.UTF_8);
+            final byte[] content = new byte[bom.length + body.length];
+            System.arraycopy(bom, 0, content, 0, bom.length);
+            System.arraycopy(body, 0, content, bom.length, body.length);
+            Files.write(file, content);
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("both records stored despite BOM-only first line", 2, callback.getDataMapList().size());
+            assertEquals("no failures when BOM stripped before blank check: " + failureUrls, 0, failureUrls.size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * stop() 後は alive が false になり、レコードが処理されないことを検証する。
+     */
+    @Test
+    public void test_storeData_stopsWhenNotAlive() throws Exception {
+        final Path file = Files.createTempFile("stop", ".jsonl");
+
+        try {
+            Files.writeString(file, "{\"url\":\"http://example.com/1\"}\n{\"url\":\"http://example.com/2\"}\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.stop();
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("nothing is processed after stop()", 0, callback.getDataMapList().size());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * alive をファイルループの外側だけでなく processFile 内のレコードループでも
+     * 見ていることを検証する。1件目を store() した直後に stop() を呼び、2件目が
+     * 処理されないことを、件数だけでなく内容（1件目の url）でも確認する。件数だけの
+     * 比較だと、内側の alive チェックが失われて2件目が残ってしまっても検出できない。
+     */
+    @Test
+    public void test_storeData_stopsMidRecordLoop() throws Exception {
+        final Path file = Files.createTempFile("stopmid", ".jsonl");
+
+        try {
+            Files.writeString(file, "{\"url\":\"http://example.com/1\"}\n{\"url\":\"http://example.com/2\"}\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback() {
+                @Override
+                public void store(final DataStoreParams paramMap, final Map<String, Object> dataMap) {
+                    super.store(paramMap, dataMap);
+                    // Stop mid-crawl, from inside the very callback the record loop drives.
+                    dataStore.stop();
+                }
+            };
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            final List<Map<String, Object>> dataMapList = callback.getDataMapList();
+            assertEquals("only the first record is processed before stop() takes effect", 1, dataMapList.size());
+            assertEquals("the surviving record is the first one", "http://example.com/1", dataMapList.get(0).get("url"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * 読み取れないファイルが失敗として記録されることを検証する。
+     */
+    @Test
+    public void test_storeData_recordsUnreadableFile() throws Exception {
+        final Path dir = Files.createTempDirectory("unreadable");
+        final Path good = dir.resolve("good.jsonl");
+        final Path bad = dir.resolve("bad.jsonl");
+
+        try {
+            Files.writeString(good, "{\"url\":\"http://example.com/1\"}\n");
+            Files.writeString(bad, "{\"url\":\"http://example.com/2\"}\n");
+            assertTrue("the file must become unreadable", bad.toFile().setReadable(false, false));
+            // setReadable(false, ...) is a silent no-op for the file's owner when running as
+            // root (e.g. inside a root Docker container), so self-skip rather than go red.
+            Assumptions.assumeTrue(!Files.isReadable(bad), "cannot make file unreadable (running as root?)");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", good + "," + bad);
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("the readable file is still processed", 1, callback.getDataMapList().size());
+            assertEquals("the unreadable file is recorded as a failure", 1, failureUrls.size());
+            assertTrue("failure refers to the unreadable file: " + failureUrls, failureUrls.get(0).contains(bad.toString()));
+        } finally {
+            bad.toFile().setReadable(true, false);
+            Files.deleteIfExists(good);
+            Files.deleteIfExists(bad);
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    /**
+     * DataStoreCrawlingException(url, message, cause, true) が store() から投げられたとき、
+     * processFile のレコードループとファイルループの両方が break することを検証する。
+     * 1ファイル目に2件、2ファイル目に1件のレコードを置き、1件目の store() で abort する
+     * コールバックを使う。2ファイル目は決して開かれないため、試みられるレコードは1件だけ。
+     * failureUrls の errorName が例外そのものではなく cause (IllegalStateException) から、
+     * url が StatsKeyObject の id ではなく DataStoreCrawlingException#getUrl() から取られる
+     * ことも同時に固定する。
+     */
+    @Test
+    public void test_storeData_abortsOnDataStoreCrawlingException() throws Exception {
+        final Path dir = Files.createTempDirectory("abort");
+        final Path file1 = dir.resolve("a.jsonl");
+        final Path file2 = dir.resolve("b.jsonl");
+
+        try {
+            Files.writeString(file1, "{\"url\":\"http://example.com/1\"}\n{\"url\":\"http://example.com/2\"}\n");
+            // Ensure file1 sorts before file2 by last modified time.
+            Thread.sleep(100);
+            Files.writeString(file2, "{\"url\":\"http://example.com/3\"}\n");
+
+            final List<Map<String, Object>> attempted = new ArrayList<>();
+            final IndexUpdateCallback callback = new IndexUpdateCallback() {
+                @Override
+                public void store(final DataStoreParams paramMap, final Map<String, Object> dataMap) {
+                    attempted.add(new HashMap<>(dataMap));
+                    throw new DataStoreCrawlingException("http://example.com/1", "boom", new IllegalStateException("boom"), true);
+                }
+
+                @Override
+                public long getDocumentSize() {
+                    return attempted.size();
+                }
+
+                @Override
+                public long getExecuteTime() {
+                    return 0;
+                }
+
+                @Override
+                public void commit() {
+                    // nothing to do
+                }
+            };
+
+            final DataStoreParams params = new DataStoreParams();
+            params.put("directories", dir.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("only the first record is attempted: the record loop breaks on abort and the file loop "
+                    + "breaks too, so file2's record is never reached: " + attempted, 1, attempted.size());
+            assertEquals("exactly one failure is recorded: " + failureUrls, 1, failureUrls.size());
+            assertEquals(
+                    "errorName must come from the exception's cause (IllegalStateException), not the "
+                            + "exception itself, and url must come from DataStoreCrawlingException#getUrl(), " + "not the stats key id",
+                    "java.lang.IllegalStateException @ http://example.com/1", failureUrls.get(0));
+        } finally {
+            Files.deleteIfExists(file1);
+            Files.deleteIfExists(file2);
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    /**
+     * 空行を挟んでも行カウンタが実ファイルの行番号を追い続けることを検証する。1行目は
+     * 正常なレコード、2行目は空行、3行目は不正な JSON。記録される失敗の id が "@2" では
+     * なく "@3" で終わることを確認する。count++ が空行スキップ判定より前で行われている
+     * 必要があり、そうでなければ失敗はエディタ上の実際の行を指さなくなる。
+     */
+    @Test
+    public void test_storeData_lineNumberTracksRealLinesAcrossBlank() throws Exception {
+        final Path file = Files.createTempFile("linenum", ".jsonl");
+
+        try {
+            Files.writeString(file, "{\"url\":\"http://example.com/1\"}\n" + "\n" + "{not valid json\n");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
+
+            assertEquals("only the valid first line is stored", 1, callback.getDataMapList().size());
+            assertEquals("exactly one failure is recorded for the malformed third line: " + failureUrls, 1, failureUrls.size());
+            assertTrue("failure id must point at real line 3, not line 2 - the blank line must not consume " + "a line-number slot: "
+                    + failureUrls, failureUrls.get(0).endsWith("@3"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
      * Helper method to invoke private methods using reflection.
      */
+
     @SuppressWarnings("unchecked")
     private <T> T invokeMethod(Object obj, String methodName, Object... args) throws Exception {
         Class<?>[] paramTypes = new Class<?>[args.length];
@@ -550,12 +900,17 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     /**
      * Test implementation of IndexUpdateCallback for testing purposes.
      */
-    private static class TestIndexUpdateCallback implements IndexUpdateCallback {
-        private int callCount = 0;
+    static class TestIndexUpdateCallback implements IndexUpdateCallback {
+        private final List<Map<String, Object>> dataMapList = new ArrayList<>();
 
         @Override
-        public void store(DataStoreParams paramMap, Map<String, Object> dataMap) {
-            callCount++;
+        public void store(final DataStoreParams paramMap, final Map<String, Object> dataMap) {
+            dataMapList.add(new HashMap<>(dataMap));
+        }
+
+        @Override
+        public long getDocumentSize() {
+            return dataMapList.size();
         }
 
         @Override
@@ -564,16 +919,12 @@ public class JsonDataStoreTest extends UnitDsTestCase {
         }
 
         @Override
-        public long getDocumentSize() {
-            return 0;
-        }
-
-        @Override
         public void commit() {
+            // nothing to do
         }
 
-        public int getCallCount() {
-            return callCount;
+        List<Map<String, Object>> getDataMapList() {
+            return dataMapList;
         }
     }
 }

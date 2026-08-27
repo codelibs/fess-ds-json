@@ -24,6 +24,7 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -36,9 +37,12 @@ import org.apache.logging.log4j.Logger;
 import org.codelibs.core.lang.StringUtil;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.app.service.FailureUrlService;
+import org.codelibs.fess.crawler.exception.CrawlingAccessException;
+import org.codelibs.fess.crawler.exception.MultipleCrawlingAccessException;
 import org.codelibs.fess.ds.AbstractDataStore;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.entity.DataStoreParams;
+import org.codelibs.fess.exception.DataStoreCrawlingException;
 import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.helper.CrawlerStatsHelper;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsAction;
@@ -76,6 +80,16 @@ public class JsonDataStore extends AbstractDataStore {
 
     private static final String DIRS_PARAM = "directories";
 
+    /** Zero-width no-break space, i.e. the character a UTF-8 BOM decodes to. */
+    private static final char BOM_CHAR = '\uFEFF';
+
+    /** Reused across every record; never reconfigured, which is Jackson's condition for sharing a mapper. */
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    /** Reused across every record to avoid a per-record allocation for the same generic type. */
+    private final TypeReference<Map<String, Object>> mapTypeReference = new TypeReference<Map<String, Object>>() {
+    };
+
     private String[] fileSuffixes = { ".json", ".jsonl" };
 
     /**
@@ -103,10 +117,28 @@ public class JsonDataStore extends AbstractDataStore {
         }
 
         for (final File file : fileList) {
-            processFile(dataConfig, callback, paramMap, scriptMap, defaultDataMap, file, fileEncoding);
+            if (!alive) {
+                logger.info("Stopped crawling: {}", file.getAbsolutePath());
+                break;
+            }
+            if (!processFile(dataConfig, callback, paramMap, scriptMap, defaultDataMap, file, fileEncoding)) {
+                // The data store was asked to abort on this record; stop reading further files.
+                break;
+            }
         }
     }
 
+    /**
+     * Resolves the files this data store should process from the {@value #FILES_PARAM} or
+     * {@value #DIRS_PARAM} parameter. When {@value #FILES_PARAM} is blank, falls back to
+     * {@value #DIRS_PARAM}, collecting the matching files from each directory and sorting
+     * them by last modified time (oldest first). Paths that do not exist, are not a file or
+     * directory as expected, or whose suffix is not one of {@link #fileSuffixes} are skipped
+     * with a warning rather than failing the whole crawl.
+     *
+     * @param paramMap the data store parameters
+     * @return the resolved list of files to process, oldest-modified first
+     */
     private List<File> getFileList(final DataStoreParams paramMap) {
         String value = paramMap.getAsString(FILES_PARAM);
         final List<File> fileList = new ArrayList<>();
@@ -116,26 +148,32 @@ public class JsonDataStore extends AbstractDataStore {
                 throw new DataStoreException(FILES_PARAM + " and " + DIRS_PARAM + " are blank.");
             }
             logger.info("{}={}", DIRS_PARAM, value);
-            final String[] values = value.split(",");
+            final String[] values = splitPaths(value);
             for (final String path : values) {
                 final File dir = new File(path);
-                if (dir.isDirectory()) {
-                    stream(dir.listFiles()).of(stream -> stream.filter(f -> isDesiredFile(f.getParentFile(), f.getName()))
+                if (!dir.exists()) {
+                    logger.warn("{} does not exist.", path);
+                } else if (!dir.isDirectory()) {
+                    logger.warn("{} is not a directory.", path);
+                } else {
+                    stream(dir.listFiles()).of(stream -> stream.filter(f -> isDesiredFile(f.getName()))
                             .sorted(Comparator.comparingLong(File::lastModified))
                             .forEach(fileList::add));
-                } else {
-                    logger.warn("{} is not a directory.", path);
                 }
             }
         } else {
             logger.info("{}={}", FILES_PARAM, value);
-            final String[] values = value.split(",");
+            final String[] values = splitPaths(value);
             for (final String path : values) {
                 final File file = new File(path);
-                if (file.isFile() && isDesiredFile(file.getParentFile(), file.getName())) {
-                    fileList.add(file);
+                if (!file.exists()) {
+                    logger.warn("{} does not exist.", path);
+                } else if (!file.isFile()) {
+                    logger.warn("{} is not a file.", path);
+                } else if (!isDesiredFile(file.getName())) {
+                    logger.warn("{} is skipped because its suffix is not one of {}.", path, Arrays.toString(fileSuffixes));
                 } else {
-                    logger.warn("{} is not found.", path);
+                    fileList.add(file);
                 }
             }
         }
@@ -145,7 +183,23 @@ public class JsonDataStore extends AbstractDataStore {
         return fileList;
     }
 
-    private boolean isDesiredFile(final File parentFile, final String filename) {
+    /**
+     * Splits a comma-separated parameter value and drops blank elements.
+     *
+     * @param value comma-separated value
+     * @return trimmed, non-blank elements
+     */
+    private String[] splitPaths(final String value) {
+        return stream(value.split(",")).get(stream -> stream.map(String::trim).filter(StringUtil::isNotBlank).toArray(n -> new String[n]));
+    }
+
+    /**
+     * Determines whether a file name has one of the configured suffixes.
+     *
+     * @param filename the file name to check
+     * @return {@code true} if the name ends with one of {@link #fileSuffixes}
+     */
+    private boolean isDesiredFile(final String filename) {
         final String name = filename.toLowerCase(Locale.ROOT);
         for (final String suffix : fileSuffixes) {
             if (name.endsWith(suffix)) {
@@ -159,24 +213,43 @@ public class JsonDataStore extends AbstractDataStore {
         return paramMap.getAsString(FILE_ENCODING_PARAM, Constants.UTF_8);
     }
 
-    private void processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
+    /**
+     * Processes a single file and stores each record through the callback.
+     *
+     * @param dataConfig the data store configuration
+     * @param callback the index update callback
+     * @param paramMap the data store parameters
+     * @param scriptMap the script mappings for field conversion
+     * @param defaultDataMap the default data values
+     * @param file the file to process
+     * @param fileEncoding the character encoding of the file
+     * @return {@code false} if crawling must stop, {@code true} to continue with the next file
+     */
+    private boolean processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap, final File file, final String fileEncoding) {
         final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
-        final ObjectMapper objectMapper = new ObjectMapper();
 
         final String scriptType = getScriptType(paramMap);
         logger.info("Loading {}", file.getAbsolutePath());
+        boolean aborted = false;
         try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(file), fileEncoding))) {
             int count = 0;
-            for (String line; (line = br.readLine()) != null;) {
+            for (String line; alive && (line = br.readLine()) != null;) {
                 count++;
+                if (count == 1) {
+                    line = stripBom(line);
+                }
+                if (StringUtil.isBlank(line)) {
+                    // A blank line is not a record. Skipping it silently keeps it out of
+                    // the failure URL list, matching how CsvDataStore treats empty rows.
+                    continue;
+                }
                 final StatsKeyObject statsKey = new StatsKeyObject(file.getAbsolutePath() + "@" + count);
                 paramMap.put(Constants.CRAWLER_STATS_KEY, statsKey);
                 final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
                 try {
                     crawlerStatsHelper.begin(statsKey);
-                    final Map<String, Object> source = objectMapper.readValue(line, new TypeReference<Map<String, Object>>() {
-                    });
+                    final Map<String, Object> source = objectMapper.readValue(line, mapTypeReference);
                     final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap.asMap());
 
                     resultMap.putAll(source);
@@ -198,20 +271,94 @@ public class JsonDataStore extends AbstractDataStore {
 
                     callback.store(paramMap, dataMap);
                     crawlerStatsHelper.record(statsKey, StatsAction.FINISHED);
+                } catch (final CrawlingAccessException e) {
+                    logger.warn("Crawling Access Exception at : {}", dataMap, e);
+
+                    Throwable target = e;
+                    if (target instanceof final MultipleCrawlingAccessException ex) {
+                        final Throwable[] causes = ex.getCauses();
+                        if (causes.length > 0) {
+                            target = causes[causes.length - 1];
+                        }
+                    }
+
+                    String errorName;
+                    final Throwable cause = target.getCause();
+                    if (cause != null) {
+                        errorName = cause.getClass().getCanonicalName();
+                    } else {
+                        errorName = target.getClass().getCanonicalName();
+                    }
+
+                    String url = statsKey.getId();
+                    if (target instanceof final DataStoreCrawlingException dce) {
+                        if (dce.getUrl() != null) {
+                            url = dce.getUrl();
+                        }
+                        if (dce.aborted()) {
+                            aborted = true;
+                        }
+                    }
+
+                    final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
+                    failureUrlService.store(dataConfig, errorName, url, target);
+                    crawlerStatsHelper.record(statsKey, StatsAction.ACCESS_EXCEPTION);
                 } catch (final Throwable t) {
                     logger.warn("Crawling Access Exception at : {}", dataMap, t);
                     final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
                     failureUrlService.store(dataConfig, t.getClass().getCanonicalName(), statsKey.getId(), t);
                     crawlerStatsHelper.record(statsKey, StatsAction.EXCEPTION);
                 } finally {
+                    // Call done() exactly once per record regardless of the outcome above, then break
+                    // out of the loop afterwards if the exception handler asked us to abort - avoids
+                    // the harmless-but-confusing double done() call that calling it again before break
+                    // would cause (CrawlerStatsHelper#done treats a second call as a silent no-op).
                     crawlerStatsHelper.done(statsKey);
+                }
+                if (aborted) {
+                    break;
                 }
             }
         } catch (final FileNotFoundException e) {
             logger.warn("Source file {} does not exist.", file, e);
+            recordFileFailure(dataConfig, file, e);
         } catch (final IOException e) {
-            logger.warn("IO Error occurred while reading source file.", e);
+            logger.warn("IO Error occurred while reading source file {}.", file, e);
+            recordFileFailure(dataConfig, file, e);
         }
+        return !aborted;
+    }
+
+    /**
+     * Records a file-level failure so that a crawl which could not read one of its inputs
+     * is not reported as fully successful.
+     *
+     * @param dataConfig the data configuration being crawled
+     * @param file the file that could not be read
+     * @param e the cause
+     */
+    private void recordFileFailure(final DataConfig dataConfig, final File file, final Throwable e) {
+        final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
+        failureUrlService.store(dataConfig, e.getClass().getCanonicalName(), file.getAbsolutePath(), e);
+    }
+
+    /**
+     * Removes a leading byte order mark from the first line of a file.
+     *
+     * <p>
+     * {@link InputStreamReader} decodes a UTF-8 BOM to U+FEFF and hands it to the caller
+     * rather than discarding it, which makes the first JSON object of a BOM-prefixed file
+     * unparseable.
+     * </p>
+     *
+     * @param line the line to clean
+     * @return the line without a leading BOM
+     */
+    private String stripBom(final String line) {
+        if (!line.isEmpty() && line.charAt(0) == BOM_CHAR) {
+            return line.substring(1);
+        }
+        return line;
     }
 
     /**
