@@ -47,7 +47,7 @@ import org.codelibs.fess.opensearch.config.exentity.CrawlingConfig;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.opensearch.config.exentity.FailureUrl;
 import org.codelibs.fess.script.ScriptEngineFactory;
-import org.codelibs.fess.script.groovy.GroovyEngine;
+import org.codelibs.fess.script.javascript.JavaScriptEngine;
 import org.codelibs.fess.util.ComponentUtil;
 
 /**
@@ -77,7 +77,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
 
     public JsonDataStore dataStore;
 
-    /** FailureUrlService に記録された失敗を "<errorName> @ <url>" 形式で保持する。 */
+    /** Failures recorded through FailureUrlService, held as "<errorName> @ <url>". */
     public final List<String> failureUrls = new ArrayList<>();
 
     @Override
@@ -96,15 +96,16 @@ public class JsonDataStoreTest extends UnitDsTestCase {
         dataStore = new JsonDataStore();
         failureUrls.clear();
 
-        // storeData は CrawlerStatsHelper を使い、CrawlerStatsHelper は SystemHelper を使う。
-        // 初期化済みインスタンスを登録してパイプライン全体をテスト内で通せるようにする。
+        // storeData uses CrawlerStatsHelper, which in turn uses SystemHelper. Register initialized
+        // instances of both so that the tests run the whole pipeline.
         ComponentUtil.register(new SystemHelper(), "systemHelper");
         final CrawlerStatsHelper crawlerStatsHelper = new CrawlerStatsHelper();
         crawlerStatsHelper.init();
         ComponentUtil.register(crawlerStatsHelper, "crawlerStatsHelper");
 
-        // 失敗記録の本物は OpenSearch を要求するため、記録内容だけを控える no-op に差し替える。
-        // ComponentUtil.getComponent(Class) が解決できるよう正準名で登録する。
+        // The real failure store needs OpenSearch, so substitute a no-op that only remembers what
+        // it was asked to record. Registered under the canonical name so that
+        // ComponentUtil.getComponent(Class) resolves it.
         ComponentUtil.register(new FailureUrlService() {
             @Override
             public FailureUrl store(final CrawlingConfig crawlingConfig, final String errorName, final String url, final Throwable e) {
@@ -113,13 +114,14 @@ public class JsonDataStoreTest extends UnitDsTestCase {
             }
         }, FailureUrlService.class.getCanonicalName());
 
-        // 実際の GroovyEngine を登録する。scriptMap のテンプレートが resultMap の完全一致キーで
-        // ないとき（例: 連結式）、AbstractDataStore#convertValue がここを経由する。DI コンテナ経由
-        // ではなく直接 new するため @PostConstruct init() は呼ばれないが、evaluate() が必要とする
-        // スクリプトキャッシュはコンストラクタの buildScriptCache() だけで揃う。
-        final ScriptEngineFactory scriptEngineFactory = new ScriptEngineFactory();
-        scriptEngineFactory.add(Constants.DEFAULT_SCRIPT, new GroovyEngine());
-        ComponentUtil.register(scriptEngineFactory, "scriptEngineFactory");
+        // Register the real JavaScriptEngine: AbstractDataStore#convertValue comes through it
+        // whenever a scriptMap template is not an exact key of resultMap - a concatenation, for
+        // example. Constructing it directly rather than through the DI container means
+        // @PostConstruct init() never runs, but the script cache evaluate() needs is built by the
+        // constructor's own buildScriptCache(). register() binds it under its own name
+        // (Constants.DEFAULT_SCRIPT) and its aliases.
+        ComponentUtil.register(new ScriptEngineFactory(), "scriptEngineFactory");
+        new JavaScriptEngine().register();
     }
 
     @Override
@@ -137,7 +139,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * setFileSuffixes による DI 経由の設定が resolver に伝わることを検証する。
+     * Test that a DI-supplied setFileSuffixes reaches the resolver.
      */
     @Test
     public void test_setFileSuffixes_customSuffixes() throws Exception {
@@ -181,10 +183,10 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 旧名 fileEncoding が引き続き効くことを検証する（ParamMap の自動変換による）。
-     * あわせて、内部パラメータ名が file_encoding に改名されたことを確認する
-     * （ParamMap はどちらの綴りで問い合わせても同じ値を返すため、改名自体は
-     * この reflection によるチェックでしか黒箱的に検証できない）。
+     * Test that the old fileEncoding spelling still works, through ParamMap's automatic
+     * conversion, and that the internal parameter name is now file_encoding. ParamMap answers
+     * either spelling with the same value, so the rename itself can only be observed from outside
+     * by the reflective check below.
      */
     @Test
     public void test_getFileEncoding_legacyCamelCaseKey() throws Exception {
@@ -201,7 +203,8 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 新名 file_encoding が素直に効くことを検証する（旧名だけを試すテストの裏返し）。
+     * Test that the new file_encoding spelling works on its own; the mirror image of the test
+     * above, which tries only the old one.
      */
     @Test
     public void test_getFileEncoding_canonicalSnakeCaseKey() throws Exception {
@@ -235,7 +238,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * storeData が JSON/JSONL の全レコードを callback に渡すことを検証する。
+     * Test that storeData hands every record of a JSON/JSONL file to the callback.
      */
     @Test
     public void test_storeData_withValidFiles() throws Exception {
@@ -277,7 +280,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 拡張子が対象外のファイルが処理されないことを検証する。
+     * Test that a file whose suffix is not accepted is not processed.
      */
     @Test
     public void test_storeData_fileFiltering() throws Exception {
@@ -308,7 +311,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 空行・空白行が失敗として記録されずスキップされることを検証する。
+     * Test that empty and blank lines are skipped rather than recorded as failures.
      */
     @Test
     public void test_storeData_skipsBlankLines() throws Exception {
@@ -334,7 +337,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * UTF-8 BOM 付きファイルの先頭レコードが読めることを検証する。
+     * Test that the first record of a file carrying a UTF-8 BOM is readable.
      */
     @Test
     public void test_storeData_stripsUtf8Bom() throws Exception {
@@ -406,7 +409,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * stop() 後は alive が false になり、レコードが処理されないことを検証する。
+     * Test that alive is false after stop() and that no record is processed.
      */
     @Test
     public void test_storeData_stopsWhenNotAlive() throws Exception {
@@ -431,10 +434,10 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * alive をファイルループの外側だけでなく processSource 内のレコードループでも
-     * 見ていることを検証する。1件目を store() した直後に stop() を呼び、2件目が
-     * 処理されないことを、件数だけでなく内容（1件目の url）でも確認する。件数だけの
-     * 比較だと、内側の alive チェックが失われて2件目が残ってしまっても検出できない。
+     * Test that alive is checked in processSource's record loop as well as in the outer file loop.
+     * stop() is called right after the first record is stored, and the second record is shown to
+     * be unprocessed by its content (the first record's url) and not only by the count: a count
+     * alone would still pass if the inner check were lost and the second record survived.
      */
     @Test
     public void test_storeData_stopsMidRecordLoop() throws Exception {
@@ -467,7 +470,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 読み取れないファイルが失敗として記録されることを検証する。
+     * Test that a file which cannot be read is recorded as a failure.
      */
     @Test
     public void test_storeData_recordsUnreadableFile() throws Exception {
@@ -503,13 +506,13 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * DataStoreCrawlingException(url, message, cause, true) が store() から投げられたとき、
-     * processSource のレコードループとソースループの両方が break することを検証する。
-     * 1ファイル目に2件、2ファイル目に1件のレコードを置き、1件目の store() で abort する
-     * コールバックを使う。2ファイル目は決して開かれないため、試みられるレコードは1件だけ。
-     * failureUrls の errorName が例外そのものではなく cause (IllegalStateException) から、
-     * url が StatsKeyObject の id ではなく DataStoreCrawlingException#getUrl() から取られる
-     * ことも同時に固定する。
+     * Test that a DataStoreCrawlingException(url, message, cause, true) thrown from store() breaks
+     * out of both processSource's record loop and the source loop. The first file holds two
+     * records and the second one, and the callback aborts on the first store(), so the second
+     * file is never opened and exactly one record is attempted. This also pins where the failure
+     * record's parts come from: errorName from the cause (IllegalStateException) rather than from
+     * the exception itself, and url from DataStoreCrawlingException#getUrl() rather than from the
+     * StatsKeyObject id.
      */
     @Test
     public void test_storeData_abortsOnDataStoreCrawlingException() throws Exception {
@@ -569,11 +572,11 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 空行を挟んでも行番号が実ファイルの行番号を追い続けることを検証する。1行目は
-     * 正常なレコード、2行目は空行、3行目は不正な JSON。記録される失敗の id が "@2" では
-     * なく "@3" で終わることを確認する。JsonRecordReader#getCurrentLineNumber() が返す
-     * 行番号をレコードカウンタの代わりに使う必要があり、そうでなければ失敗はエディタ上の
-     * 実際の行を指さなくなる。
+     * Test that line numbers keep following the real lines of the file across a blank line. The
+     * first line is a good record, the second is blank and the third is malformed JSON, and the
+     * recorded failure id must end in "@3" rather than "@2". This is what requires the line number
+     * from JsonRecordReader#getCurrentLineNumber() instead of a record counter; with a counter the
+     * failure no longer points at the line an editor shows.
      */
     @Test
     public void test_storeData_lineNumberTracksRealLinesAcrossBlank() throws Exception {
@@ -600,14 +603,15 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 先頭が '{' ではない不正な行（紛れ込んだログ行など）があっても、その行だけが失敗として
-     * 記録され、後続の行が登録されることを検証する。JSONL は行区切りなので、1行の失敗が
-     * 1行分のコストで済まなければならない。
+     * Test that a malformed line which does not start with '{' - a log line that found its way
+     * into the file, say - is recorded as a failure on its own, and that the lines after it are
+     * still indexed. JSON Lines is line-delimited, so one bad line has to cost exactly one line.
      *
      * <p>
-     * トークンストリームで読むと {@code MappingIterator#hasNext()} が {@code JsonParseException} を
-     * 素の {@code RuntimeException} で包んで投げ、それが storeData の外まで抜けてデータ設定
-     * 全体を落とす。storeData が例外を投げないことも同時に固定する。
+     * Read as a token stream instead, {@code MappingIterator#hasNext()} wraps the
+     * {@code JsonParseException} in a plain {@code RuntimeException} and throws it out of
+     * storeData, taking down the whole data config. That storeData throws nothing is pinned here
+     * too.
      * </p>
      */
     @Test
@@ -636,9 +640,10 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * '{' で始まる不正な行があっても、その行だけが失敗として記録され、後続の行が登録される
-     * ことを検証する。トークンストリームで読むとこの行の失敗はソース全体の打ち切りになり、
-     * 3行目が失敗記録もログもないまま消える。
+     * Test that a malformed line which does start with '{' is likewise recorded as a failure on
+     * its own, with the lines after it still indexed. Read as a token stream, a failure on this
+     * line ends the whole source and the third line disappears with neither a failure record nor
+     * a log line.
      */
     @Test
     public void test_storeData_recoversFromBracePrefixedMalformedLine() throws Exception {
@@ -665,8 +670,9 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * format に未知の値を書いた設定ミスが、storeData から抜ける例外ではなく失敗記録になる
-     * ことを検証する。抜けるとデータ設定全体が中断され、失敗記録も残らない。
+     * Test that an unknown format value becomes a failure record rather than an exception escaping
+     * storeData. An escaping exception abandons the whole data config and leaves no failure
+     * record behind.
      */
     @Test
     public void test_storeData_invalidFormatIsReportedNotThrown() throws Exception {
@@ -696,10 +702,10 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * include_pattern / exclude_pattern に不正な正規表現を書いた設定ミスが、storeData から
-     * 抜ける PatternSyntaxException ではなく、当該パラメータ名を持つ失敗記録になることを
-     * 検証する。抜けるとデータ設定全体が中断され、失敗は configId:name に帰属して
-     * どのパラメータが悪いのか記録に残らない。
+     * Test that an invalid regular expression in include_pattern or exclude_pattern becomes a
+     * failure record named after that parameter, rather than a PatternSyntaxException escaping
+     * storeData. An escaping exception abandons the whole data config and files the failure
+     * against configId:name, so nothing in the record says which parameter was wrong.
      */
     @Test
     public void test_storeData_invalidPatternIsReportedNotThrown() throws Exception {
@@ -708,11 +714,11 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 不正な正規表現を持つパラメータ1つを storeData に通し、例外ではなく失敗記録1件に
-     * なることを検証する。
+     * Runs storeData with one parameter carrying an invalid regular expression and checks that it
+     * produces a single failure record rather than an exception.
      *
-     * @param patternParam 検証するパラメータ名
-     * @throws Exception 一時ファイルの操作に失敗した場合
+     * @param patternParam the parameter to test
+     * @throws Exception if the temporary file cannot be handled
      */
     private void assertPatternParameterIsReported(final String patternParam) throws Exception {
         final Path file = Files.createTempFile("badpattern", ".jsonl");
@@ -743,9 +749,10 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * まだ実装されていない urls パラメータが、storeData から抜ける例外ではなく、
-     * 当該パラメータ名を持つ失敗記録になることを検証する。抜けるとデータ設定全体が
-     * 中断され、失敗は configId:name に帰属して、どのパラメータが原因か記録に残らない。
+     * Test that the not-yet-implemented urls parameter becomes a failure record named after that
+     * parameter rather than an exception escaping storeData. An escaping exception abandons the
+     * whole data config and files the failure against configId:name, so nothing in the record
+     * says which parameter caused it.
      */
     @Test
     public void test_storeData_urlsIsReportedNotThrown() throws Exception {
@@ -766,14 +773,14 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 途中で切れて二度と同期し直せないドキュメントを、トークンストリーム経路が
-     * 無限に読み続けずに打ち切り、その旨を警告に残すことを検証する。
+     * Test that the token-stream path gives up on a document truncated where it can never
+     * resynchronize, instead of reading it forever, and says so in a warning.
      *
      * <p>
-     * format=json でトークンストリームを強制する。1件目のあと 2行目が閉じられないまま
-     * ファイルが終わるので、Jackson は次のレコードを探しては失敗し続け、ストリーム終端にも
-     * 到達しない。最初の失敗で打ち切る実装だと後続が黙って消え、上限を持たない実装だと
-     * クロールが終わらない。
+     * format=json forces the token stream. The file ends with its second line unclosed after one
+     * good record, so Jackson keeps looking for the next record, keeps failing, and never reaches
+     * the end of the stream. An implementation that gave up on the first failure would lose the
+     * records after it in silence; one with no bound at all would never finish the crawl.
      * </p>
      */
     @Test
@@ -806,10 +813,11 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 1行目が壊れている3つの形でも2行目以降が失われないことを検証する。bare word、
-     * '{' 始まり、そして途中で切れた1行目。AUTO は既定であり、途中で切れたダウンロードは
-     * まさにこの形になる。1行目だけを見て判定すると、これらは「整形済み単一オブジェクト」と
-     * 誤判定されてトークンストリームに載り、後続レコードが黙って消える。
+     * Test that none of the lines after a broken first line are lost, in three shapes of broken
+     * first line: a bare word, one starting with '{', and one cut off mid-record. AUTO is the
+     * default, and a download that stopped halfway looks exactly like the third. A look-ahead
+     * that judged the document from its first line alone would take these for a pretty-printed
+     * single object, read them as a token stream, and lose the records after them in silence.
      */
     @Test
     public void test_storeData_recoversFromMalformedFirstLine() throws Exception {
@@ -820,12 +828,12 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 1行目が壊れたファイルを storeData に通し、残り2レコードが登録され失敗が1件だけ
-     * 記録されることを検証する。
+     * Runs storeData over a file whose first line is broken and checks that the remaining two
+     * records are indexed and exactly one failure is recorded.
      *
-     * @param shape 失敗時のメッセージに使う形の名前
-     * @param content ファイル内容。1行目が不正、続く2行が正常なレコード
-     * @throws Exception 一時ファイルの操作に失敗した場合
+     * @param shape the name of the shape, used in assertion messages
+     * @param content the file content: a malformed first line followed by two good records
+     * @throws Exception if the temporary file cannot be handled
      */
     private void assertFirstLineShape(final String shape, final String content) throws Exception {
         final Path file = Files.createTempFile("firstline", ".jsonl");
@@ -851,10 +859,11 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 2行目が「完全なオブジェクトで始まる」だけの単一オブジェクトが、JSON Lines と
-     * 誤判定されないことを検証する。{@code {"a":\n{"b":1}}} は妥当な JSON 1件だが、
-     * 2行目 {@code {"b":1}}} は完全なオブジェクトの後ろに余分な {@code }} が続くだけである。
-     * 2行目の判定を厳密にしないと行経路に載り、レコードが失われる。
+     * Test that a single object whose second line merely starts with a complete object is not
+     * mistaken for JSON Lines. {@code {"a":\n{"b":1}}} is one valid JSON document, and its second
+     * line {@code {"b":1}}} is a complete object followed by nothing but a stray {@code }}.
+     * Unless the second line is judged strictly, the document goes down the line path and records
+     * are lost.
      */
     @Test
     public void test_storeData_valueOnNextLineIsNotJsonLines() throws Exception {
@@ -882,9 +891,9 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 上と同じ形に、入れ子の後ろへ兄弟フィールドを足したもの。2行目
-     * {@code {"x":1},} は完全なオブジェクトのあとにカンマが続くだけで、レコードではない。
-     * 誤判定されるとオブジェクト全体が3行に切り刻まれる。
+     * The same shape as above with a sibling field added after the nested object. Its second line
+     * {@code {"x":1},} is a complete object followed by a comma, not a record. Mistaken for one,
+     * the whole object is chopped into three lines.
      */
     @Test
     public void test_storeData_valueOnNextLineWithSiblingFieldIsNotJsonLines() throws Exception {
@@ -911,9 +920,9 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 1行に2件のオブジェクトが並ぶ行から先頭の1件だけが登録される、という本フェーズ以前からの
-     * 挙動が変わっていないことを明示的に固定する。2行目の判定を厳密にした一方で、1行目の判定は
-     * 意図的に緩いままである。将来これを黙って引き締められないようにする。
+     * Pins, explicitly, that a line holding two objects still indexes only the first of them, as
+     * it did before this phase. The second line is judged strictly while the first is left
+     * deliberately lenient, and that asymmetry is not to be tightened in silence later.
      */
     @Test
     public void test_storeData_twoObjectsOnFirstLineStillYieldsOnlyTheFirst() throws Exception {
@@ -941,10 +950,11 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 1行目だけでなく2行目も壊れている JSONL から、3行目以降が失われないことを検証する。
-     * 2行のバナーや2行分の転送進捗が JSONL エクスポートの上に付くのはありふれた形であり、
-     * マージ元 (1aaa07a) はそれらの2行だけを失って残りを登録していた。先読みが最初の2行で
-     * 打ち切ると、両方失敗した時点でトークンストリームに落ち、ソース全体が消える。
+     * Test that nothing from the third line on is lost when the second line of a JSON Lines file
+     * is broken as well as the first. A two-line banner, or two lines of transfer progress, above
+     * an export is an ordinary shape, and the merge base (1aaa07a) lost exactly those two lines
+     * and indexed the rest. A look-ahead that stopped after two lines would fall back to the
+     * token stream once both had failed, and lose the whole source.
      */
     @Test
     public void test_storeData_twoBadLeadingLinesDoNotCostTheRecordsBelow() throws Exception {
@@ -972,10 +982,10 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 行末が {@code '\r'} だけのファイルでも全レコードが登録されることを検証する。
-     * {@code '\r'} を行終端として扱わないとファイル全体が1行になり、寛容なパースが
-     * 先頭の1件だけを返して残りが失敗記録もログもなく消える。本ブランチで唯一の
-     * 「黙って失われる」経路だった。
+     * Test that every record of a file whose lines end in a bare {@code '\r'} is indexed. Unless
+     * {@code '\r'} counts as a line terminator the whole file is one line, and the lenient parse
+     * returns only its first record while the rest disappear with neither a failure record nor a
+     * log line - the one silently-losing path this branch had.
      */
     @Test
     public void test_storeData_crOnlyLineEndings() throws Exception {
@@ -1002,8 +1012,9 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * CRLF のファイルが、{@code "\r\n"} を2つの終端と数えて空行を挟むことなく読めることを
-     * 検証する。空行が挟まると失敗の行番号が実ファイルの行とずれる。
+     * Test that a CRLF file reads without a blank line between records, that is, that
+     * {@code "\r\n"} is not counted as two terminators. A blank line between them would put the
+     * line numbers of failures out of step with the real file.
      */
     @Test
     public void test_storeData_crlfLineEndings() throws Exception {
@@ -1031,9 +1042,10 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * root_path と format=jsonl が同時に指定されたとき、format が黙って捨てられるのではなく
-     * 警告として残ることを検証する。JSON Pointer で辿るドキュメントは構造を持つため
-     * トークンストリームで読むしかなく、解決自体は正しいが、黙って行うべきではない。
+     * Test that root_path together with format=jsonl leaves a warning rather than dropping the
+     * format in silence. A document navigated by a JSON Pointer has a structure and can only be
+     * read as a token stream, so the resolution itself is right - but it should not happen
+     * quietly.
      */
     @Test
     public void test_storeData_rootPathWithFormatJsonlIsWarned() throws Exception {
@@ -1062,11 +1074,12 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 配列内の1件の不正な要素が、失敗記録1件で報告され、かつ前後の正常な要素が2件とも
-     * 登録されることを検証する。トークンストリームは不正な区間を1文字ずつ踏み越えながら
-     * 失敗を繰り返すため、素直に記録すると同じ URL に対する同一の失敗記録が積み上がる。
-     * 失敗件数だけを見ると、不正要素のあとの要素が丸ごと消えても緑のままになる。そちらが
-     * 保証として重い。
+     * Test that one malformed element inside an array is reported as a single failure record and
+     * that both good elements around it are still indexed. A token stream steps over an
+     * unparseable stretch one character at a time and fails again for each, so recording every
+     * one of those would pile identical failures against the same URL. The count alone would stay
+     * green even if the element after the malformed one vanished entirely, and that is the
+     * heavier guarantee of the two.
      */
     @Test
     public void test_storeData_oneBadArrayElementIsOneFailure() throws Exception {
@@ -1096,7 +1109,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * JSON 配列ファイルが全レコード登録されることを検証する。
+     * Test that every record of a JSON array file is indexed.
      */
     @Test
     public void test_storeData_jsonArrayFile() throws Exception {
@@ -1120,11 +1133,11 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 行頭に空白がある JSONL でも、壊れた1行目のあとの正常な行が登録されることを検証する。
-     * マージ元 (1aaa07a) は無条件に行単位で読んでいたためこの形を 2件登録しており、
-     * 先読みが「行頭が空白でない行だけを記録とみなす」と、インデントされた JSONL が
-     * まるごとトークンストリームに落ちてソースが消える。空白インデントとタブインデントの
-     * 両方を固定する。
+     * Test that the good lines after a broken first line are still indexed when the JSON Lines
+     * records are indented. The merge base (1aaa07a) read every document line by line
+     * unconditionally and so indexed two records from this shape; a look-ahead that took only
+     * lines starting in column zero for records would drop indented JSON Lines onto the token
+     * stream and lose the source. Both space and tab indentation are pinned.
      */
     @Test
     public void test_storeData_indentedJsonLinesWithMalformedFirstLine() throws Exception {
@@ -1133,11 +1146,12 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * インデントされた JSONL を storeData に通し、1行目の失敗1件と後続2件の登録を確認する。
+     * Runs storeData over indented JSON Lines and checks the one failure on the first line and the
+     * two records indexed after it.
      *
-     * @param shape 失敗時のメッセージに使う形の名前
-     * @param indent 各行の先頭に付ける空白
-     * @throws Exception 一時ファイルの操作に失敗した場合
+     * @param shape the name of the shape, used in assertion messages
+     * @param indent the whitespace prefixed to every line
+     * @throws Exception if the temporary file cannot be handled
      */
     private void assertIndentedJsonLines(final String shape, final String indent) throws Exception {
         final Path file = Files.createTempFile("indented", ".jsonl");
@@ -1165,9 +1179,9 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 整形済みラッパーオブジェクトを root_path 付きで読んだとき、ネストした配列が正しく
-     * 取り出せることを検証する。これがこの形の唯一の実用的な設定であり、AUTO 判定を
-     * どう変えてもここは影響を受けてはならない (root_path は先読み自体を飛ばす)。
+     * Test that a pretty-printed wrapper object read with a root_path yields the elements of its
+     * nested array. This is the only practical configuration for that shape, and no change to
+     * AUTO detection may affect it: root_path skips the look-ahead entirely.
      */
     @Test
     public void test_storeData_rootPathOnPrettyPrintedWrapper() throws Exception {
@@ -1195,14 +1209,15 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 同じラッパーを root_path なしで読んだときに何が起きるかを明示的に固定する。
+     * Pins, explicitly, what reading that same wrapper without a root_path does.
      *
      * <p>
-     * これは AUTO 判定の代償そのものである。整形済みラッパーは行単位に切り刻まれ、
-     * 中の配列要素2件が登録され、残り5行が失敗として記録される。マージ元 (1aaa07a) は
-     * 無条件に行単位で読んでいたので、まったく同じ結果になる。root_path なしでこの形を
-     * 1レコードとして読む方が良く見えるが、それは url が null の文書1件にしかならない。
-     * 代償を明示的に書き出しておくことで、この判断を暗黙に覆せないようにする。
+     * This is the price of AUTO detection. The pretty-printed wrapper is chopped up line by line:
+     * its two array elements are indexed and the remaining five lines are recorded as failures.
+     * The merge base (1aaa07a) read every document line by line unconditionally, so it produced
+     * exactly the same result. Reading this shape as one record without a root_path looks better
+     * until you see what it yields - a single document whose url is null. Writing the price down
+     * keeps the decision from being reversed by accident.
      * </p>
      */
     @Test
@@ -1231,7 +1246,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * root_path でネストした配列を取り出せることを検証する。
+     * Test that root_path pulls the records out of a nested array.
      */
     @Test
     public void test_storeData_rootPath() throws Exception {
@@ -1255,7 +1270,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 機微パラメータがスクリプトから読めないことを検証する。
+     * Test that sensitive parameters cannot be read from a script.
      */
     @Test
     public void test_storeData_doesNotExposeSecretsToScript() throws Exception {
@@ -1287,9 +1302,9 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 完全一致ではなくスクリプトエンジン経由（連結式）で機微パラメータに触れても、
-     * 秘密の値自体は取り出せないことを検証する。GroovyEngine は null オペランドを
-     * 文字列化するため、結果は空文字ではなく "[null]" になる。
+     * Test that reaching a sensitive parameter through the script engine rather than by an exact
+     * match - by concatenating it - still does not recover the secret. JavaScriptEngine
+     * stringifies a null operand, so the result is "[null]" rather than an empty string.
      */
     @Test
     public void test_storeData_scriptConcatenationOfFilteredParameterYieldsNullString() throws Exception {
@@ -1301,10 +1316,14 @@ public class JsonDataStoreTest extends UnitDsTestCase {
             final DataStoreParams params = new DataStoreParams();
             params.put("files", file.toString());
             params.put("access_token", "t0ken");
+            // Only this test needs an engine at all, and an unset script type resolves to Groovy
+            // (AbstractDataStore#getScriptType returns Constants.LEGACY_SCRIPT), which ships as a
+            // separate plugin and is not on this test's classpath. Name the engine setUp registers.
+            params.put("script_type", Constants.DEFAULT_SCRIPT);
             final Map<String, String> scriptMap = new HashMap<>();
             scriptMap.put("url", "url");
             // Not an exact-match template, so convertValue falls through to the real
-            // GroovyEngine registered in setUp() instead of the containsKey fast path.
+            // JavaScriptEngine registered in setUp() instead of the containsKey fast path.
             scriptMap.put("wrapped_token", "'[' + access_token + ']'");
 
             dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
@@ -1319,7 +1338,8 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * レコード側のフィールドが、フィルタ済みパラメータと同名であっても優先されることを検証する。
+     * Test that a record field takes priority even when it has the same name as a filtered
+     * parameter.
      */
     @Test
     public void test_storeData_recordFieldOverridesFilteredParameter() throws Exception {
@@ -1345,8 +1365,8 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * {@link ComponentUtil#getFessConfig()} が {@code null} を返す場合でも、
-     * フィルタリングが既定パターンへフォールバックして継続することを検証する。
+     * Test that filtering falls back to the default pattern and carries on when
+     * {@link ComponentUtil#getFessConfig()} returns {@code null}.
      */
     @Test
     public void test_resolveEncryptPropertyPattern_nullConfigFallsBackToDefault() throws Exception {
@@ -1364,8 +1384,8 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 設定されたパターンが空文字の場合でも、フィルタリングが既定パターンへ
-     * フォールバックして継続することを検証する。
+     * Test that filtering falls back to the default pattern and carries on when the configured
+     * pattern is blank.
      */
     @Test
     public void test_resolveEncryptPropertyPattern_blankPatternFallsBackToDefault() throws Exception {
@@ -1383,8 +1403,9 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * 設定されたパターンが不正な正規表現（Pattern.compile が PatternSyntaxException を投げる）の
-     * 場合でも、フィルタリングが既定パターンへフォールバックして継続することを検証する。
+     * Test that filtering falls back to the default pattern and carries on when the configured
+     * pattern is not a valid regular expression, that is, when Pattern.compile throws a
+     * PatternSyntaxException.
      */
     @Test
     public void test_resolveEncryptPropertyPattern_malformedPatternFallsBackToDefault() throws Exception {
@@ -1402,8 +1423,8 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * FessConfig へのアクセス自体が例外を投げる場合でも、フィルタリングが既定パターンへ
-     * フォールバックして継続することを検証する。
+     * Test that filtering falls back to the default pattern and carries on when the FessConfig
+     * lookup itself throws.
      */
     @Test
     public void test_resolveEncryptPropertyPattern_configAccessorThrowsFallsBackToDefault() throws Exception {
@@ -1421,12 +1442,12 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
-     * {@link FessConfig#getAppEncryptPropertyPattern()} だけが呼ばれる想定の、最小限の
-     * {@link FessConfig} スタブを作る。フル実装（数百メソッド）を用意する代わりに、
-     * 呼ばれた場合にのみ値を返す動的プロキシを使う。
+     * Builds a minimal {@link FessConfig} stub for tests that call nothing but
+     * {@link FessConfig#getAppEncryptPropertyPattern()}. A dynamic proxy answering that one call
+     * stands in for a full implementation of the (several hundred method) interface.
      *
-     * @param pattern {@link FessConfig#getAppEncryptPropertyPattern()} が返す値
-     * @return 指定した値だけを返す {@link FessConfig}
+     * @param pattern the value {@link FessConfig#getAppEncryptPropertyPattern()} returns
+     * @return a {@link FessConfig} that answers with that value and nothing else
      */
     private static FessConfig fessConfigReturningPattern(final String pattern) {
         return (FessConfig) java.lang.reflect.Proxy.newProxyInstance(FessConfig.class.getClassLoader(), new Class<?>[] { FessConfig.class },
