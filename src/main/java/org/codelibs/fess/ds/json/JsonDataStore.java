@@ -303,16 +303,17 @@ public class JsonDataStore extends AbstractDataStore {
      * A matching key is kept present with a {@code null} value rather than dropped outright.
      * {@code convertValue} treats an absent key as "not a literal parameter reference" and falls
      * back to evaluating the template as a script through the configured script engine instead.
-     * That fallback does not by itself lose the record: a raw parameter name such as
-     * {@code crawler.web.auth.a.password} is valid Groovy (a property-access chain) - it fails at
-     * runtime with {@code MissingPropertyException} because nothing binds a variable named
-     * {@code crawler}, and {@code GroovyEngine#evaluate} catches exactly that, logs a WARN, and
-     * returns {@code null}. Dropping the key was rejected anyway, on grounds independent of that
-     * outcome: keeping it present-and-null never invokes the script engine for a blocked
-     * parameter at all, so blocking a field costs no script compile and no WARN per record; it
-     * does not depend on Groovy specifically, so a {@code scriptType} naming an engine that is
-     * not registered - a configuration this data store neither controls nor validates - would
-     * genuinely fail the whole record on the dropped-key fallback path; and it is the only shape
+     * That fallback does not by itself lose the record on the default JavaScript engine: a raw
+     * parameter name such as {@code crawler.web.auth.a.password} parses as a property-access
+     * chain and fails at runtime because nothing binds a variable named {@code crawler}, and
+     * {@code JavaScriptEngine#evaluate} catches that, logs a WARN, and returns {@code null}.
+     * Dropping the key was rejected anyway, on grounds independent of that outcome: keeping it
+     * present-and-null never invokes the script engine for a blocked parameter at all, so blocking
+     * a field costs no script compile and no WARN per record; it does not depend on which engine
+     * evaluates the template, so a {@code scriptType} naming an engine that is not registered - no
+     * longer hypothetical, since an unset script type resolves to Groovy and the Groovy engine
+     * ships as a separate plugin - would genuinely fail the whole record on the dropped-key
+     * fallback path; and it is the only shape
      * under which "the record is still indexed with the field simply absent" can be relied on
      * regardless of which script engine is configured. Keeping the key present with
      * {@code containsKey() == true} and a
@@ -326,8 +327,8 @@ public class JsonDataStore extends AbstractDataStore {
      * <p>
      * A script that reaches a blocked parameter only through the script engine - for example by
      * concatenating it, as in {@code "'[' + access_token + ']'"} - still cannot recover the
-     * secret, but the field does not simply come out empty either: Groovy's {@code +} stringifies
-     * a {@code null} operand, so the result is the literal text {@code "[null]"}, not
+     * secret, but the field does not simply come out empty either: JavaScript's {@code +}
+     * stringifies a {@code null} operand, so the result is the literal text {@code "[null]"}, not
      * {@code "[]"} and not an error. Whatever field a script builds that way indexes that literal
      * text.
      * </p>

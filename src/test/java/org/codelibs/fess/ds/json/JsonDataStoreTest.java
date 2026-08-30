@@ -47,7 +47,7 @@ import org.codelibs.fess.opensearch.config.exentity.CrawlingConfig;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.opensearch.config.exentity.FailureUrl;
 import org.codelibs.fess.script.ScriptEngineFactory;
-import org.codelibs.fess.script.groovy.GroovyEngine;
+import org.codelibs.fess.script.javascript.JavaScriptEngine;
 import org.codelibs.fess.util.ComponentUtil;
 
 /**
@@ -113,13 +113,13 @@ public class JsonDataStoreTest extends UnitDsTestCase {
             }
         }, FailureUrlService.class.getCanonicalName());
 
-        // 実際の GroovyEngine を登録する。scriptMap のテンプレートが resultMap の完全一致キーで
+        // 実際の JavaScriptEngine を登録する。scriptMap のテンプレートが resultMap の完全一致キーで
         // ないとき（例: 連結式）、AbstractDataStore#convertValue がここを経由する。DI コンテナ経由
         // ではなく直接 new するため @PostConstruct init() は呼ばれないが、evaluate() が必要とする
         // スクリプトキャッシュはコンストラクタの buildScriptCache() だけで揃う。
-        final ScriptEngineFactory scriptEngineFactory = new ScriptEngineFactory();
-        scriptEngineFactory.add(Constants.DEFAULT_SCRIPT, new GroovyEngine());
-        ComponentUtil.register(scriptEngineFactory, "scriptEngineFactory");
+        // register() は自分の名前 (Constants.DEFAULT_SCRIPT) とその別名で登録する。
+        ComponentUtil.register(new ScriptEngineFactory(), "scriptEngineFactory");
+        new JavaScriptEngine().register();
     }
 
     @Override
@@ -1288,7 +1288,7 @@ public class JsonDataStoreTest extends UnitDsTestCase {
 
     /**
      * 完全一致ではなくスクリプトエンジン経由（連結式）で機微パラメータに触れても、
-     * 秘密の値自体は取り出せないことを検証する。GroovyEngine は null オペランドを
+     * 秘密の値自体は取り出せないことを検証する。JavaScriptEngine は null オペランドを
      * 文字列化するため、結果は空文字ではなく "[null]" になる。
      */
     @Test
@@ -1301,10 +1301,14 @@ public class JsonDataStoreTest extends UnitDsTestCase {
             final DataStoreParams params = new DataStoreParams();
             params.put("files", file.toString());
             params.put("access_token", "t0ken");
+            // Only this test needs an engine at all, and an unset script type resolves to Groovy
+            // (AbstractDataStore#getScriptType returns Constants.LEGACY_SCRIPT), which ships as a
+            // separate plugin and is not on this test's classpath. Name the engine setUp registers.
+            params.put("script_type", Constants.DEFAULT_SCRIPT);
             final Map<String, String> scriptMap = new HashMap<>();
             scriptMap.put("url", "url");
             // Not an exact-match template, so convertValue falls through to the real
-            // GroovyEngine registered in setUp() instead of the containsKey fast path.
+            // JavaScriptEngine registered in setUp() instead of the containsKey fast path.
             scriptMap.put("wrapped_token", "'[' + access_token + ']'");
 
             dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>());
