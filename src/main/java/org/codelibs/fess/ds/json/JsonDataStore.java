@@ -396,6 +396,15 @@ public class JsonDataStore extends AbstractDataStore {
         try (JsonSource openSource = source;
                 InputStream in = openSource.openStream();
                 JsonRecordReader reader = new JsonRecordReader(in, fileEncoding, format, rootPath)) {
+            if (reader.isRootPathUnmatched()) {
+                // Without this the crawl ends with zero documents, no log line and no failure: a
+                // typo in root_path is indistinguishable from an empty source. Only the setting
+                // names are logged, never anything read from the document.
+                logger.warn(
+                        "{} {} of data config {} did not match anything in {}, so no records were read from it. "
+                                + "Check it against the structure of the document.",
+                        ROOT_PATH_PARAM, rootPath, dataConfig.getName(), source.getName());
+            }
             int count = 0;
             int consecutiveFailures = 0;
             int lastFailingLine = NO_FAILING_LINE;

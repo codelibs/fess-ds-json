@@ -388,6 +388,24 @@ public class JsonRecordReaderTest {
     }
 
     @Test
+    public void test_rootPath_unmatchedIsFlagged() throws IOException {
+        try (JsonRecordReader reader = openReader("{\"data\":{\"items\":[{\"a\":1}]}}", Format.AUTO, "/data/itemz")) {
+            assertTrue(reader.isRootPathUnmatched());
+            assertFalse(reader.hasNext());
+        }
+    }
+
+    @Test
+    public void test_rootPath_matchedOrAbsentIsNotFlagged() throws IOException {
+        for (final String[] c : new String[][] { { "{\"data\":{\"items\":[{\"a\":1}]}}", "/data/items" },
+                { "{\"data\":{\"items\":[]}}", "/data/items" }, { "", "/data/items" }, { "{\"a\":1}", null } }) {
+            try (JsonRecordReader reader = openReader(c[0], Format.AUTO, c[1])) {
+                assertFalse(reader.isRootPathUnmatched(), c[0]);
+            }
+        }
+    }
+
+    @Test
     public void test_rootPath_topLevelArray() throws IOException {
         final String json = "{\"items\":[{\"a\":1}]}";
         assertEquals(1, readAll(json, Format.AUTO, "/items").size());

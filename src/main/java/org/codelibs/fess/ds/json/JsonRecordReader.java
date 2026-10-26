@@ -177,6 +177,9 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
      */
     private final boolean singleRecordOnly;
 
+    /** True when a {@code rootPath} was given but no value in the document has that JSON Pointer. */
+    private final boolean rootPathUnmatched;
+
     /** Whether the sole record has already been returned, when {@link #singleRecordOnly} is true. */
     private boolean singleRecordConsumed;
 
@@ -220,6 +223,7 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
         MappingIterator<Map<String, Object>> openedIterator = null;
         boolean openedLineOriented = false;
         boolean openedSingleRecordOnly = false;
+        boolean openedRootPathUnmatched = false;
         try {
             openedReader = new BufferedReader(stripBom(new InputStreamReader(in, encoding)));
 
@@ -255,6 +259,7 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
                     if (token == null) {
                         // The pointer did not match anything in the document.
                         openedIterator = null;
+                        openedRootPathUnmatched = true;
                     } else if (token == JsonToken.START_ARRAY) {
                         // MappingIterator does not unwrap a root array: step inside it first.
                         if (openedParser.nextToken() != JsonToken.END_ARRAY) {
@@ -287,6 +292,18 @@ public class JsonRecordReader implements java.util.Iterator<Map<String, Object>>
         iterator = openedIterator;
         lineOriented = openedLineOriented;
         singleRecordOnly = openedSingleRecordOnly;
+        rootPathUnmatched = openedRootPathUnmatched;
+    }
+
+    /**
+     * Tells whether the {@code rootPath} given to the constructor matched nothing in a
+     * non-empty document, which is what a mistyped pointer looks like: the reader then yields no
+     * records, exactly as it does for a document that really has none.
+     *
+     * @return {@code true} if a {@code rootPath} was given and no value in the document has that pointer
+     */
+    public boolean isRootPathUnmatched() {
+        return rootPathUnmatched;
     }
 
     /**
