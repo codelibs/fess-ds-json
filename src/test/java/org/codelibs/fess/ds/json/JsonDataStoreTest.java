@@ -1270,6 +1270,68 @@ public class JsonDataStoreTest extends UnitDsTestCase {
     }
 
     /**
+     * Test that a root_path matching nothing is reported instead of ending in an empty crawl with
+     * no log line at all, and that the warning names the setting and the source but nothing read
+     * from the document.
+     */
+    @Test
+    public void test_storeData_rootPathThatMatchesNothingIsWarned() throws Exception {
+        final Path file = Files.createTempFile("rootpathtypo", ".json");
+
+        try {
+            Files.writeString(file, "{\"data\":{\"items\":[{\"url\":\"http://example.com/SECRETVALUE\"}]}}");
+
+            final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+            final DataStoreParams params = new DataStoreParams();
+            params.put("files", file.toString());
+            params.put("root_path", "/data/itemz");
+            final Map<String, String> scriptMap = new HashMap<>();
+            scriptMap.put("url", "url");
+
+            final List<String> logMessages =
+                    captureDataStoreLogs(() -> dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>()));
+
+            assertEquals("nothing is read", 0, callback.getDataMapList().size());
+            assertTrue("the unmatched root_path must be named out loud: " + logMessages,
+                    logMessages.stream().anyMatch(m -> m.contains("root_path /data/itemz") && m.contains(file.toString())));
+            assertTrue("document content must not be logged: " + logMessages,
+                    logMessages.stream().noneMatch(m -> m.contains("SECRETVALUE")));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
+     * Test that a root_path that does match, even when it selects an empty array, stays quiet.
+     */
+    @Test
+    public void test_storeData_rootPathThatMatchesIsNotWarned() throws Exception {
+        final Path file = Files.createTempFile("rootpathok", ".json");
+
+        try {
+            for (final String json : new String[] { "{\"data\":{\"items\":[{\"url\":\"http://example.com/1\"}]}}",
+                    "{\"data\":{\"items\":[]}}", "" }) {
+                Files.writeString(file, json);
+
+                final TestIndexUpdateCallback callback = new TestIndexUpdateCallback();
+                final DataStoreParams params = new DataStoreParams();
+                params.put("files", file.toString());
+                params.put("root_path", "/data/items");
+                final Map<String, String> scriptMap = new HashMap<>();
+                scriptMap.put("url", "url");
+
+                final List<String> logMessages =
+                        captureDataStoreLogs(() -> dataStore.storeData(new DataConfig(), callback, params, scriptMap, new HashMap<>()));
+
+                assertTrue("no warning expected for [" + json + "]: " + logMessages,
+                        logMessages.stream().noneMatch(m -> m.contains("did not match")));
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /**
      * Test that sensitive parameters cannot be read from a script.
      */
     @Test
